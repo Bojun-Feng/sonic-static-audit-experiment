@@ -1,0 +1,196 @@
+# Static source audit experiment
+
+A local preparation wrapper with a SONiC SWSS routing/interface profile. It
+compares an **exhaustive** queue of relevant production files with a **targeted**
+queue of prefix/partial-match and structured-key candidates. The baseline
+generates and validates artifacts; it performs no model discovery or bug triage.
+
+Requirements: Python 3.10+ (standard library only), Bash, and an existing source
+checkout. `ast-grep` is optional. Preparation performs no installation. The separate
+Lima bootstrap installs pinned audit CLIs only when explicitly run with `--create`.
+
+## Prepare
+
+Run from this repository:
+
+```sh
+./experiment/run-experiment.sh prepare exhaustive --repo /path/to/sonic-swss --out ./results/exhaustive
+./experiment/run-experiment.sh prepare targeted --repo /path/to/sonic-swss --out ./results/targeted
+```
+
+Defaults are the sibling `sonic-swss` checkout, `results/MODE` in this repository,
+and `experiment/config.json`. `--config /path/to/profile.json` overrides the
+profile. Relative overrides are relative to the caller's working directory.
+Output and source must be disjoint directories. Identical reruns are accepted;
+changed inputs/configuration or partial output require a fresh `--out` directory.
+Existing results are never silently replaced or deleted.
+
+The commands can also be used separately:
+
+```sh
+python3 -B experiment/src/select.py --repo /path/to/sonic-swss --config experiment/config.json --out ./results/manual
+python3 -B experiment/src/extract.py --repo /path/to/sonic-swss --index ./results/manual/selected-groups.json
+python3 -B experiment/src/validate.py --out ./results/manual
+```
+
+Selection defaults to targeted mode. `--mode exhaustive` writes the exhaustive
+manifest and an explicit empty, `not-run` targeted index; it does not invoke a
+matcher or require cards. The runner passes the expected mode to validation.
+
+## Selection and provenance
+
+Edit the small profile to change roots, literal domain anchors, patterns, or
+context. `intended_source_commit` is pinned to the exact proposed-fix commit;
+selection rejects any other source revision. The manifest also records the actual
+HEAD independently.
+Only `.git/HEAD`, its loose ref, or `packed-refs` are read for commit metadata;
+no Git commands, configuration, hooks, credentials, or history are read.
+Standalone checkouts and plain snapshots are supported. Snapshots record a null
+commit. Linked worktrees/external Git metadata are rejected instead of traversed.
+
+Selection walks the configured roots in sorted order and includes `.c`, `.cc`,
+`.cpp`, `.cxx`, `.h`, `.hh`, `.hpp`, and `.hxx` files. It skips symlinks, hidden
+entries, test/mock directories and common test filenames, build outputs,
+packaging/container/testbed directories, and virtual environments. Missing roots,
+invalid UTF-8 source, and an empty relevant manifest fail explicitly.
+
+Domain inclusion is a case-insensitive literal substring match in the relative
+path **or** file contents. Every matching anchor is recorded as an inclusion
+reason. Broad anchors such as `port` intentionally favor recall. The manifest
+records the canonical source root, commit, complete profile, file SHA-256 hashes,
+and LF-based line counts. It covers current working-tree bytes, including local
+edits/untracked production files; the commit alone does not assert a clean tree.
+
+When available on PATH, `ast-grep` (or an `sg` binary reporting itself as
+`ast-grep`) searches the configured structural patterns. Source is passed on
+stdin, parsed as C++ (including C/header inputs), with an explicit empty config
+inside output scratch space. It does not traverse the target, load target
+configuration, or inherit provider credentials. Installed-tool errors fail the
+run. Its version is recorded; use the same version when comparing preparations.
+The command format follows the [ast-grep CLI reference](https://ast-grep.github.io/reference/cli/run.html).
+
+If neither executable is available, selection announces and records the
+deterministic `python-regex` fallback. Its version `1` refers to this baseline
+algorithm. Configured ASCII regexes scan UTF-8 bytes with Python's `re.MULTILINE`.
+They can match comments/strings, miss complex syntax, and stop at the first
+closing parenthesis. Both engines intentionally produce broad candidates (for
+example, `find` may be a full lookup rather than a prefix check); their results
+are not equivalent and are not findings. No fallback match claims an AST-derived
+function. All baseline cards use explicitly labeled line windows.
+
+## Artifacts and validation
+
+```text
+OUT/
+  manifest.json
+  selected-groups.json
+  groups/                    # targeted mode only, even for zero groups
+    g-<20 hex digits>/
+      source-card.md
+      scope.json
+```
+
+There is one targeted group per matched file. Matches are deduplicated and sorted
+by start byte, end byte, and pattern ID. A group ID hashes the relative path,
+source hash, exact matches, and context size. The index binds to the manifest's
+SHA-256. No timestamps, random IDs, or output paths enter the persisted artifacts.
+For the same source location/bytes, profile, engine, and engine version, repeated
+preparations produce byte-identical artifacts.
+
+Each match includes a zero-based, half-open byte range and one-based inclusive
+line range. Extraction adds the configured context before/after the full match,
+clips at file boundaries, and merges overlapping windows. Disjoint windows stay
+separate within the same card. Scope metadata contains exact ranges and source
+hashes; numbered excerpts are verified against the source bytes.
+
+Validation checks exact directory inventories (including rejection of extra
+partial files), JSON structure, source commit, the complete current manifest,
+hashes, groups, locations, IDs, and byte-for-byte rendered scopes/cards. It also
+recomputes regex candidates, detecting omissions. AST artifacts can be validated
+without installing ast-grep: their source bytes, ranges, and cards are verified,
+but structural-match completeness is not independently re-proved. An interrupted
+write remains invalid and must be regenerated in a fresh output directory.
+Validation prints `PASS` or `FAIL` and returns nonzero for invalid state.
+
+## Create the clean audit VM
+
+On Apple Silicon/macOS with Lima **2.2.1** installed:
+
+```sh
+./experiment/bootstrap-lima.sh --dry-run
+./experiment/bootstrap-lima.sh --create \
+  --source /absolute/path/to/sonic-swss \
+  --reference /absolute/path/to/reference-materials \
+  --results /absolute/path/to/audit-results
+```
+
+All three paths must be existing, absolute, disjoint directories; results must
+be empty. Home directories, the repository parent, hidden directories, and
+symlink mount roots are refused. `--dry-run` also accepts these three paths to
+validate and print the exact planned YAML, host commands, and guest script. With
+no paths it uses labeled placeholders. Dry-run never invokes Lima, downloads,
+creates scratch files, or changes VM state. No-argument invocation is an error.
+
+The [create command](https://lima-vm.io/docs/reference/limactl_create/) uses a
+literal config: VM `sonic-static-audit`, VZ/ARM64, 4 CPUs, 8 GiB RAM, 40 GiB disk,
+and the existing Ubuntu 24.04 image dated 2026-10-17 with its pinned
+[SHA-256](https://cloud-images.ubuntu.com/releases/noble/release-20261017/SHA256SUMS).
+It refuses an existing VM, including stopped or partial state. Inherited Lima
+`_config/default.yaml` or `override.yaml` is refused; use a clean, absolute
+`LIMA_HOME` if needed, and keep that same environment for later manual commands.
+Lima maintains its own VM state there (normally `~/.lima`). Bootstrap's input
+YAML lives only in a private temporary directory, removed on success or failure.
+No permanent host YAML is written separately from Lima's managed VM state.
+
+Only source and references are mounted read-only, at `/mnt/source` and
+`/mnt/references`; the separate `/mnt/results` mount is writable. Host home,
+repository parent, host credentials, SSH keys/agent, and proxy credentials are
+never shared. Containerd and automatic port forwarding are disabled. Inputs
+must be dedicated source/reference trees, not directories containing credentials.
+The guest downloads a checksummed
+[Node 22.14.0 binary](https://nodejs.org/download/release/v22.14.0/SHASUMS256.txt)
+and installs the exact npm versions in `experiment/config.json`:
+Codex **0.157.1** and Claude Code **2.1.302**. npm lifecycle scripts are disabled;
+no package source compilation is allowed. CLI wrappers disable automatic updates.
+
+Guest setup runs only version probes, verifies them against the pins, and writes
+`/mnt/results/setup-receipt.txt`. Host validation requires that final receipt to
+be the only result. A failure during creation, start, setup, receipt validation,
+or a caught interrupt destroys the new VM, removes an incomplete receipt, and
+cleans temporary config. **A retry starts from scratch.** It never patches or
+repairs an existing VM. If Lima itself cannot delete the VM, the script fails
+with the exact manual delete command; do not reuse that partial VM. Unexpected
+user files in results are reported, never silently deleted.
+
+After successful setup, the script prints these manual commands:
+
+```sh
+limactl shell --workdir=/home/audit sonic-static-audit codex login --device-auth
+limactl shell --workdir=/home/audit sonic-static-audit claude auth login
+```
+
+[Codex device auth](https://developers.openai.com/codex/cli/reference/) and
+[Claude auth](https://code.claude.com/docs/en/cli-reference) are never run by
+bootstrap. This VM is for isolated **static-only** CLI audit sessions later.
+Bootstrap does not execute source, run source builds/tests, install Docker,
+start virtual switches, invoke model agents, or mutate GitHub. Preparation
+remains local-only; explicit VM creation downloads its image and pinned tooling.
+
+## Local verification
+
+```sh
+python3 -B -m unittest discover -s tests -v
+bash -n experiment/bootstrap-lima.sh
+bash -n experiment/guest-setup.sh
+bash -n experiment/run-experiment.sh
+./experiment/bootstrap-lima.sh --dry-run
+```
+
+Tests use disposable OS temporary directories (or the caller's `TMPDIR`) for all
+fixtures and outputs, with output outside each source fixture. They never use
+`results/exhaustive` or `results/targeted`; generated baseline results are not
+retained in this repository. The suite exercises both preparation commands,
+deterministic filtering/extraction/validation, mocked ast-grep, and mocked Lima
+creation, refusal, rendering, receipt validation, and failure cleanup. C/C++
+fixtures are text only, never compiled or executed. No VM or real provider CLI
+is used in verification. Tests need only the Python standard library and Bash.

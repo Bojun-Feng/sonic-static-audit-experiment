@@ -1,0 +1,7 @@
+.orchestration/
+.runtime/
+__pycache__/
+*.py[cod]
+.DS_Store
+results/**
+!results/.gitkeep

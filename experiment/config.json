@@ -1,0 +1,46 @@
+{
+  "profile": "sonic-swss-routing-interface",
+  "guest_cli_versions": {"codex": "0.157.1", "claude_code": "2.1.302"},
+  "intended_source_commit": "2f1f7921551ae9f9c799c8b83b8a15b1d172d395",
+  "source_roots": ["cfgmgr", "fpmsyncd", "orchagent", "portsyncd"],
+  "domain_anchors": ["interface", "intf", "neigh", "nexthop", "port", "route", "routing", "vlan", "vnet", "vrf", "vxlan"],
+  "patterns": [
+    {
+      "id": "string-find",
+      "ast": ["$S.find($$$ARGS)", "$S->find($$$ARGS)"],
+      "regex": "(?:\\.|->)\\s*find\\s*\\([^;{}]*?\\)"
+    },
+    {
+      "id": "string-rfind",
+      "ast": ["$S.rfind($$$ARGS)", "$S->rfind($$$ARGS)"],
+      "regex": "(?:\\.|->)\\s*rfind\\s*\\([^;{}]*?\\)"
+    },
+    {
+      "id": "string-compare",
+      "ast": ["$S.compare($$$ARGS)", "$S->compare($$$ARGS)"],
+      "regex": "(?:\\.|->)\\s*compare\\s*\\([^;{}]*?\\)"
+    },
+    {
+      "id": "starts-with",
+      "ast": ["$S.starts_with($$$ARGS)", "boost::starts_with($$$ARGS)"],
+      "regex": "(?:\\.|\\bboost::)\\s*starts_with\\s*\\([^;{}]*?\\)"
+    },
+    {
+      "id": "bounded-c-compare",
+      "ast": ["strncmp($$$ARGS)", "strncasecmp($$$ARGS)"],
+      "regex": "\\b(?:strncmp|strncasecmp)\\s*\\([^;{}]*?\\)"
+    },
+    {
+      "id": "key-substring",
+      "ast": ["$S.substr($$$ARGS)", "$S->substr($$$ARGS)"],
+      "regex": "(?:\\.|->)\\s*substr\\s*\\([^;{}]*?\\)"
+    },
+    {
+      "id": "key-tokenize",
+      "ast": ["tokenize($$$ARGS)", "swss::tokenize($$$ARGS)"],
+      "regex": "\\b(?:swss::)?tokenize\\s*\\([^;{}]*?\\)"
+    }
+  ],
+  "grouping": {"policy": "per-file", "context_lines": 12, "scope": "line-window"},
+  "restrictions": {"read_only_source": true, "static_only": true, "local_only": true, "provider_calls": false}
+}
