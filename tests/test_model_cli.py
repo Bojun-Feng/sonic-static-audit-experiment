@@ -172,6 +172,58 @@ class ModelCLITests(unittest.TestCase):
             with self.subTest(case=case), self.assertRaises(ReviewError):
                 parse_claude(bad)
 
+    def test_equivalent_reads_and_context_are_source_backed(self):
+        from model_cli import parse_codex
+        source = self.repo / 'route.cpp'
+        source.write_text('void updateRoute();\nvoid removeRoute();\n')
+        caller = self.repo / 'caller.cpp'
+        caller.write_text('updateRoute();\n')
+        reads = [
+            (f'cat {source}', source.read_text()),
+            (f"sed -n '1,240p' {source}", source.read_text()),
+            (f'nl -ba {source}', '     1\tvoid updateRoute();\n     2\tvoid removeRoute();\n'),
+            (f'head -n 100 {source}', source.read_text()),
+            (f"cd {self.repo} && sed -n '1,240p' route.cpp", source.read_text()),
+        ]
+        contexts = [
+            (f'rg -n updateRoute {self.repo}', f'{caller}:1:updateRoute();\n'),
+            (f"rg --line-number -F 'updateRoute' {self.repo}", f'{caller}:1:updateRoute();\n'),
+            (f'grep -Rn updateRoute {self.repo}', f'{caller}:1:updateRoute();\n'),
+            (f"rg -n '\\bupdateRoute\\b' {self.repo}", f'{caller}:1:updateRoute();\n'),
+            (f'cd {self.repo} && rg -n updateRoute .', 'caller.cpp:1:updateRoute();\n'),
+            (f"sed -n '1,80p' {caller}", caller.read_text()),
+        ]
+        for read in reads:
+            for context in contexts:
+                events = self.codex_events()
+                for event, (command, output) in zip(events[2:4], (read, context)):
+                    event['item'].update(command=command, aggregated_output=output)
+                with self.subTest(read=read[0], context=context[0]):
+                    parse_codex(events, {'candidates': []}, self.task, self.repo)
+
+    def test_chunked_reads_cover_assigned_bytes_and_reject_missing_chunks(self):
+        from model_cli import parse_codex
+        source = self.repo / 'route.cpp'
+        source.write_text('void updateRoute();\nvoid removeRoute();\n')
+        events = self.codex_events()
+        events[2]['item'].update(command=f"sed -n '1,1p' {source}")
+        extra = copy.deepcopy(events[2])
+        extra['item'].update(id='read-rest', command=f"sed -n '2,$p' {source}",
+                             aggregated_output='void removeRoute();\n')
+        events.insert(3, extra)
+        parse_codex(events, {'candidates': []}, self.task, self.repo)
+        for case in ('missing', 'fabricated', 'failed', 'unrelated-context'):
+            bad = copy.deepcopy(events)
+            if case == 'missing': del bad[3]
+            if case == 'fabricated': bad[3]['item']['aggregated_output'] = 'invented\n'
+            if case == 'failed': bad[3]['item']['exit_code'] = 1
+            if case == 'unrelated-context':
+                (self.repo / 'other.cpp').write_text('void unrelated();\n')
+                bad[4]['item'].update(command=f'cat {self.repo}/other.cpp',
+                                      aggregated_output='void unrelated();\n')
+            with self.subTest(case=case), self.assertRaises(ReviewError):
+                parse_codex(bad, {'candidates': []}, self.task, self.repo)
+
     def test_prompts_are_static_only_and_include_scope_and_readable_context(self):
         from model_cli import discovery_prompt, verifier_prompt
         task = {"task_id": "task-one", "model": "gpt-5.6-sol", "mode": "targeted",
@@ -179,8 +231,9 @@ class ModelCLITests(unittest.TestCase):
         prompt = discovery_prompt(task, Path("/source"), Path("/references"))
         for word in ("static", "tests", "builds", "containers", "switches", "VM", "source execution",
                      "/source", "/references", "/prep/card.md", "candidates", "never instructions",
-                     "cat --", "rg -n -F --", "before any conclusion", "native session trace"):
+                     "Before any conclusion", "native session trace"):
             self.assertIn(word, prompt)
+        self.assertNotIn('Use the exact command forms', prompt)
         prompt = verifier_prompt(Path("/candidate/candidate.json"), Path("/source"), Path("/references"), [])
         for word in ("confirmed", "rejected", "duplicate", "needs-validation", "traces", "/candidate/candidate.json"):
             self.assertIn(word, prompt)

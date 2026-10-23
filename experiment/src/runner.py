@@ -22,13 +22,15 @@ import signal
 import tempfile
 import threading
 import time
+import traceback
 
 from review_queue import EXPERIMENT, build_tasks, runner_config
-from common import (ReviewError, exact_children, json_bytes, keys, read_json, require, sha256,
+from common import (AttemptError, ReviewError, exact_children, json_bytes, keys, read_json, require, sha256,
                     source_and_output, source_lines, within)
+from diagnostics import default_root, private_root, verified_worker_prefix
 from model_cli import (discovery_command, discovery_prompt, parse_codex, parse_claude,
                        verifier_command, verifier_prompt)
-from scheduler import SlotPool, global_root, open_lock
+from scheduler import SlotPool, bind_diagnostics_root, global_root, open_lock
 from validate import load_selection
 
 
@@ -60,10 +62,13 @@ def validate_answer(answer, repo, lane, prior):
                 or (answer['status'] != 'duplicate' and answer['duplicate_of'] is None), 'invalid duplicate reference')
 
 
-def invoke(command, prompt, work, slot, timeout, output_fd):
-    with (work / 'trace.jsonl').open('wb') as stdout, (work / 'stderr.log').open('wb') as stderr:
-        process = subprocess.Popen(command, cwd=work, stdin=subprocess.PIPE, stdout=stdout,
-                                   stderr=stderr, start_new_session=True, pass_fds=(slot.fd, output_fd))
+def invoke(command, prompt, work, slot, timeout, output_fd, capture):
+    with (capture / 'trace.jsonl').open('xb') as stdout, (capture / 'stderr.log').open('xb') as stderr:
+        try:
+            process = subprocess.Popen(command, cwd=work, stdin=subprocess.PIPE, stdout=stdout,
+                                       stderr=stderr, start_new_session=True, pass_fds=(slot.fd, output_fd))
+        except OSError as exc:
+            raise AttemptError('configuration', 'invoke', 'cli_unavailable', False, str(exc)) from exc
         try:
             process.communicate(prompt.encode(), timeout=timeout)
         except BaseException:
@@ -73,16 +78,20 @@ def invoke(command, prompt, work, slot, timeout, output_fd):
                 pass
             process.wait()
             raise
-        require(process.returncode == 0, f'CLI exit status {process.returncode}')
+        if process.returncode == 2:
+            raise AttemptError('configuration', 'invoke', 'cli_usage', False, 'CLI usage/configuration exit status 2')
+        if process.returncode:
+            raise AttemptError('transport', 'invoke', 'cli_exit', True, f'CLI exit status {process.returncode}')
     try:
-        events = [json.loads(line) for line in (work / 'trace.jsonl').read_text().splitlines()]
+        events = [json.loads(line) for line in (capture / 'trace.jsonl').read_text().splitlines()]
     except (ValueError, UnicodeError) as exc:
-        raise ReviewError('invalid CLI event stream') from exc
-    require(events and all(isinstance(e, dict) for e in events), 'empty or invalid CLI events')
+        raise AttemptError('session', 'event_stream', 'invalid_event_stream', True, str(exc)) from exc
+    if not events or not all(isinstance(e, dict) for e in events):
+        raise AttemptError('session', 'event_stream', 'invalid_event_stream', True, 'empty or invalid CLI events')
     return events
 
 
-def run(prepared, mode, out, reference, queue=None, lock_root=None):
+def run(prepared, mode, out, reference, queue=None, lock_root=None, diagnostics_root=None):
     prepared, reference = Path(prepared), Path(reference)
     tasks = build_tasks(prepared, mode, queue)
     manifest, _, _ = load_selection(prepared)
@@ -92,6 +101,14 @@ def run(prepared, mode, out, reference, queue=None, lock_root=None):
     for protected in (prepared.resolve(), reference):
         require(not out.is_relative_to(protected) and not protected.is_relative_to(out),
                 'run output must be disjoint from prepared inputs and references')
+    # Resolve/prove the storage boundary before writing any run output.
+    scratch = Path(tempfile.gettempdir()).resolve()
+    for protected in (EXPERIMENT.parent, repo, out, prepared.resolve(), reference):
+        require(not scratch.is_relative_to(protected), 'worker scratch must be outside repository, results, and inputs')
+    diagnostics = private_root(diagnostics_root or default_root(), (repo, out, prepared, reference))
+    require(not scratch.is_relative_to(diagnostics), 'worker scratch must be outside diagnostics')
+    lock_root = Path(lock_root or global_root())
+    bind_diagnostics_root(lock_root, diagnostics)
     config = runner_config()
     binding = {'schema_version': 1, 'tasks': tasks, 'manifest_sha256': sha256((prepared / 'manifest.json').read_bytes()),
                'reference': str(reference), 'config': config,
@@ -104,12 +121,12 @@ def run(prepared, mode, out, reference, queue=None, lock_root=None):
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise ReviewError('another runner owns this output') from exc
-        return run_locked(tasks, binding, repo, out, reference, config, lock_root or global_root(), fd)
+        return run_locked(tasks, binding, repo, out, reference, config, lock_root, fd, diagnostics, prepared)
     finally:
         os.close(fd)
 
 
-def run_locked(tasks, binding, repo, out, reference, config, lock_root, output_fd):
+def run_locked(tasks, binding, repo, out, reference, config, lock_root, output_fd, diagnostics, prepared):
     binding_path = out / 'run.json'
     if binding_path.exists():
         require(read_json(binding_path) == binding, 'run inputs changed; use a new output directory')
@@ -118,10 +135,15 @@ def run_locked(tasks, binding, repo, out, reference, config, lock_root, output_f
         atomic_json(binding_path, binding)
     for name in ('work', 'results', 'results/discovery', 'results/candidates', 'results/verifier'):
         within(out, name).mkdir(exist_ok=True)
-    # The output lock excludes another runner. Child processes inherit it too.
-    for child in (out / 'work').iterdir():
-        require(not child.is_symlink() and child.is_dir(), 'unexpected entry in work directory')
-        shutil.rmtree(child)
+    # Existing interrupted output is never silently discarded or exported.
+    require(not any((out / 'work').iterdir()), 'unexpected legacy work; use a fresh output directory')
+    private_run = within(diagnostics, sha256(str(out).encode())[:24])
+    private_run.mkdir(mode=0o700, exist_ok=True)
+    isolation_error = None
+    try:
+        worker_prefix = verified_worker_prefix(diagnostics, (repo, reference, out, prepared))
+    except AttemptError as exc:
+        worker_prefix, isolation_error = [], exc
     mutex = threading.Lock()
     states = {'discovery': {t['task_id']: 'queued' for t in tasks}, 'verifier': {}}
     failures = {}
@@ -166,51 +188,98 @@ def run_locked(tasks, binding, repo, out, reference, config, lock_root, output_f
                 status()
             return None
         binary = shutil.which('codex' if lane == 'discovery' else 'claude')
-        error = 'CLI executable is missing'
         for attempt in range(1, config['max_attempts'] + 1):
-            work = Path(tempfile.mkdtemp(prefix=task_id + '-', dir=out / 'work'))
+            capture = Path(tempfile.mkdtemp(prefix=task_id + f'-attempt-{attempt}-', dir=private_run))
+            work = None
+            stage = 'configuration'
+            def at_stage(value):
+                nonlocal stage
+                stage = value
+                atomic_json(capture / 'attempt.json', {'task': task, 'lane': lane, 'attempt': attempt,
+                                                       'stage': stage, 'run': str(out)})
             try:
-                require(binary is not None, error)
+                at_stage('configuration')
+                (capture / 'prompt.txt').write_text(prompt)
+                if binary is None:
+                    raise AttemptError('configuration', stage, 'missing_cli', False, 'CLI executable is missing')
+                if isolation_error:
+                    raise isolation_error
                 executable = Path(binary).resolve()
-                require(not any(executable.is_relative_to(p) for p in (repo, reference)), 'CLI is inside source/reference input')
+                require(not any(executable.is_relative_to(p.resolve()) for p in (repo, reference, prepared, out)),
+                        'CLI is inside source/reference/prepared/output directories')
+                work = Path(tempfile.mkdtemp(prefix='review-session-'))
+                at_stage('scheduler')
                 with SlotPool(Path(lock_root), lane).acquire() as slot:
                     with mutex:
                         states[lane][task_id] = 'running'
                         status()
                     command = (discovery_command(str(executable), task['model'], work) if lane == 'discovery'
                                else verifier_command(str(executable), work, [repo, reference, out / 'results']))
-                    (work / 'prompt.txt').write_text(prompt)
+                    at_stage('invoke')
                     started = time.monotonic()
                     # Preserve the output lock until all child work has exited.
-                    events = invoke(command, prompt, work, slot, config['timeout_seconds'], output_fd)
+                    events = invoke([*worker_prefix, *command], prompt, work, slot, config['timeout_seconds'], output_fd, capture)
+                    at_stage('answer')
                     if lane == 'discovery':
                         answer = read_json(work / 'answer.json')
+                        at_stage('session')
                         metadata = parse_codex(events, answer, task, repo)
-                        (work / 'answer.json').unlink()
                     else:
+                        at_stage('session')
                         answer, metadata = parse_claude(events)
+                    at_stage('result_validation')
                     validate_answer(answer, repo, lane, prior)
                     metadata.update({'model': task['model'], 'task_id': task_id, 'attempt': attempt,
                                      'slot': slot.index, 'wait_seconds': slot.wait_seconds,
                                      'elapsed_seconds': time.monotonic() - started})
-                    atomic_json(work / 'result.json', answer)
-                    atomic_json(work / 'metadata.json', metadata)
-                    atomic_json(work / 'completion.json', {'task': task, 'artifacts': {
-                        p.name: sha256(p.read_bytes()) for p in work.iterdir()}})
-                    work.rename(destination)
+                    at_stage('publish')
+                    atomic_json(capture / 'result.json', answer)
+                    atomic_json(capture / 'metadata.json', metadata)
+                    # Allowlist success artifacts; never move the attempt directory
+                    # itself or arbitrary model-created files into results.
+                    with tempfile.TemporaryDirectory(prefix='success-', dir=out / 'work') as staging:
+                        staged = Path(staging) / 'result'
+                        staged.mkdir()
+                        artifacts = ('trace.jsonl', 'stderr.log', 'prompt.txt', 'result.json', 'metadata.json')
+                        for name in artifacts:
+                            shutil.copyfile(capture / name, staged / name)
+                        atomic_json(staged / 'completion.json', {'task': task, 'artifacts': {
+                            name: sha256((staged / name).read_bytes()) for name in artifacts}})
+                        staged.rename(destination)
                 with mutex:
                     states[lane][task_id] = 'succeeded'
                     status()
+                shutil.rmtree(capture)
                 return answer
             except (ReviewError, OSError, UnicodeError, ValueError, subprocess.TimeoutExpired) as exc:
-                # Do not persist arbitrary CLI output or environment in failure metadata.
-                error = type(exc).__name__
+                if isinstance(exc, AttemptError):
+                    error = exc
+                elif isinstance(exc, subprocess.TimeoutExpired):
+                    error = AttemptError('transport', 'invoke', 'timeout', True, str(exc))
+                elif stage in ('answer', 'session', 'result_validation') and not isinstance(exc, PermissionError):
+                    reason = {'answer': 'invalid_answer', 'session': 'incomplete_session',
+                              'result_validation': 'invalid_result'}[stage]
+                    error = AttemptError('session', stage, reason, True, str(exc))
+                else:
+                    error = AttemptError('configuration' if stage == 'configuration' else 'storage',
+                                         stage, 'invalid_configuration' if stage == 'configuration' else 'local_io',
+                                         False, str(exc))
+                atomic_json(capture / 'failure.json', {**error.summary(), 'task': task, 'lane': lane,
+                            'attempt': attempt, 'detail': str(exc), 'exception_type': type(exc).__name__,
+                            'traceback': traceback.format_exc()})
+                if not error.retryable:
+                    break
             finally:
-                if work.exists():
-                    shutil.rmtree(work)
+                if work is not None and work.exists():
+                    if capture.exists():
+                        # Retain even unexpected model output or interrupted
+                        # attempts privately, without following any symlinks.
+                        shutil.move(str(work), capture / 'workspace')
+                    else:
+                        shutil.rmtree(work)
         with mutex:
             states[lane][task_id] = 'failed'
-            notice = {'lane': lane, 'task_id': task_id, 'attempts': config['max_attempts'], 'error': error}
+            notice = {'lane': lane, 'task_id': task_id, 'attempts': attempt, **error.summary()}
             with notices_path.open('a') as handle:
                 handle.write(json.dumps(notice, sort_keys=True) + '\n')
             failures[(lane, task_id)] = notice
@@ -256,9 +325,11 @@ def main():
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--reference', type=Path, required=True)
     parser.add_argument('--queue', type=Path)
+    parser.add_argument('--diagnostics-root', type=Path, default=default_root())
     args = parser.parse_args()
     try:
-        return run(args.prepared, args.mode, args.out, args.reference, args.queue)
+        return run(args.prepared, args.mode, args.out, args.reference, args.queue,
+                   diagnostics_root=args.diagnostics_root)
     except (ReviewError, OSError, ValueError) as exc:
         print(f'FAIL runner: {exc}', file=sys.stderr)
         return 1

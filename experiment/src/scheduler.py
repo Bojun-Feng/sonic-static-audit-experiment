@@ -35,6 +35,23 @@ def open_lock(path):
     return fd
 
 
+def bind_diagnostics_root(root, diagnostics):
+    """All runners sharing slots must hide the same persistent private root."""
+    SlotPool(root, 'discovery')  # Apply the same owner/symlink checks as slots.
+    fd = open_lock(root / 'diagnostics-root.lock')
+    expected = (str(diagnostics) + '\n').encode()
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        recorded = os.read(fd, 16384)
+        require(not recorded or recorded == expected,
+                'global scheduler is bound to another diagnostics root; use that same root')
+        if not recorded:
+            os.write(fd, expected)
+            os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 @dataclass
 class Slot:
     index: int

@@ -4,6 +4,6 @@
   "verifier_model": "claude-opus-5-5",
   "discovery_slots": 16,
   "verifier_slots": 1,
-  "max_attempts": 2,
+  "max_attempts": 3,
   "timeout_seconds": 1800
 }

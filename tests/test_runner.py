@@ -66,6 +66,22 @@ class RunnerTests(unittest.TestCase):
                                                "UNRELATED_VARIABLE": "must-not-be-recorded"})
         self.env.start()
         self.addCleanup(self.env.stop)
+        # Provider doubles run on disposable source fixtures. OS isolation has
+        # separate command/probe tests; nested sandboxing is unavailable in CI.
+        self.isolation = mock.patch('runner.verified_worker_prefix', return_value=[])
+        self.isolation.start()
+        self.addCleanup(self.isolation.stop)
+        launcher = self.bin / 'python3'
+        launcher.write_text(f'#!{sys.executable} -B\n' + '''import os, sys
+assert sys.argv[1] == '-B'
+sys.argv = sys.argv[2:]
+sys.path.insert(0, os.path.dirname(sys.argv[0]))
+import runner
+runner.verified_worker_prefix = lambda *args: []
+runner.global_root = lambda: __import__('pathlib').Path(__file__).parent.parent / 'locks'
+sys.exit(runner.main())
+''')
+        launcher.chmod(0o755)
 
     def scenario(self, value):
         (self.state / "scenario.json").write_bytes(json_bytes(value))
@@ -73,7 +89,7 @@ class RunnerTests(unittest.TestCase):
     def run_review(self, mode="exhaustive"):
         from runner import run
         return run(self.base / mode, mode, self.base / (mode + "-run"), self.reference,
-                   lock_root=self.base / "locks")
+                   lock_root=self.base / "locks", diagnostics_root=self.base / 'diagnostics')
 
     def events(self):
         return [json.loads(line) for line in (self.state / "events.jsonl").read_text().splitlines()]
@@ -92,13 +108,15 @@ class RunnerTests(unittest.TestCase):
                     "import sys; from pathlib import Path; "
                     "sys.path.insert(0, sys.argv.pop(1)); "
                     "import runner; "
+                    "runner.verified_worker_prefix = lambda *args: []; "
                     "lock_root = Path(sys.argv.pop(1)); "
                     "runner.global_root = lambda: lock_root; "
                     "sys.exit(runner.main())",
                     str(ROOT / "experiment/src"), str(self.base / "locks"),
                     "--mode", mode, "--prepared", str(self.base / mode),
                     "--out", str(self.base / (mode + "-run")),
-                    "--reference", str(self.reference), "--queue", str(queue)],
+                    "--reference", str(self.reference), '--diagnostics-root', str(self.base / 'diagnostics'),
+                    "--queue", str(queue)],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
             for process in processes:
                 stdout, stderr = process.communicate(timeout=45)
@@ -227,8 +245,91 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(status["discovery"]["failed"], 1)
         notices = [json.loads(line) for line in (out / "notifications.jsonl").read_text().splitlines()]
         self.assertEqual(len(notices), 1)
-        self.assertEqual(notices[0]["attempts"], 2)
+        self.assertEqual(notices[0]["attempts"], 3)
+        self.assertEqual(notices[0]['category'], 'transport')
+        self.assertEqual(notices[0]['stage'], 'invoke')
+        self.assertEqual(notices[0]['reason'], 'cli_exit')
         self.assertEqual(len(list((out / "results/discovery").iterdir())), 11)
+
+    def test_failed_attempts_stay_outside_publishable_results(self):
+        self.scenario({'codex': {'src/route0.cpp': {'first': 'partial'},
+                                 'src/route1.cpp': {'always': 'passive'}}})
+        self.assertEqual(self.run_review(), 1)
+        out = self.base / 'exhaustive-run'
+        diagnostic_failures = list((self.base / 'diagnostics').rglob('failure.json'))
+        self.assertEqual(len(diagnostic_failures), 8)
+        records = [read_json(path) for path in diagnostic_failures]
+        self.assertEqual({r['category'] for r in records}, {'session', 'evidence'})
+        self.assertEqual({r['stage'] for r in records}, {'answer', 'inspection'})
+        self.assertTrue(all(r['detail'] and r['retryable'] for r in records))
+        raw = b''.join(p.read_bytes() for p in (self.base / 'diagnostics').rglob('*') if p.is_file())
+        self.assertIn(b'INCOMPLETE-MARKER', raw)
+        public = b''.join(p.read_bytes() for p in out.rglob('*') if p.is_file())
+        self.assertNotIn(b'INCOMPLETE-MARKER', public)
+        self.assertNotIn(b'failure.json', public)
+        self.assertNotIn(str(self.base / 'diagnostics').encode(), public)
+        starts = [e for e in self.events() if e['event'] == 'start']
+        self.assertEqual(len({e['cwd'] for e in starts}), len(starts))
+        self.assertTrue(all(not Path(e['cwd']).is_relative_to(out) for e in starts))
+        self.assertTrue(all(not Path(e['cwd']).exists() for e in starts))
+        notices = [json.loads(line) for line in (out / 'notifications.jsonl').read_text().splitlines()]
+        self.assertTrue(all(n['attempts'] == 3 and n['reason'] == 'missing_inspection' for n in notices))
+
+    def test_missing_cli_is_deterministic_and_not_retried(self):
+        (self.bin / 'codex').unlink()
+        with mock.patch('runner.shutil.which', return_value=None):
+            self.assertEqual(self.run_review(), 1)
+        out = self.base / 'exhaustive-run'
+        notices = [json.loads(line) for line in (out / 'notifications.jsonl').read_text().splitlines()]
+        self.assertEqual(len(notices), 12)
+        self.assertTrue(all(n['attempts'] == 1 and n['category'] == 'configuration'
+                            and n['reason'] == 'missing_cli' and not n['retryable'] for n in notices))
+        self.assertFalse((self.state / 'events.jsonl').exists())
+
+    def test_third_fresh_attempt_can_succeed_with_range_inspection(self):
+        self.scenario({'codex': {'src/route0.cpp': {'failures': ['partial', 'passive'],
+                                                  'inspection': 'ranges'}}})
+        self.assertEqual(self.run_review(), 0)
+        out = self.base / 'exhaustive-run'
+        for completion in (out / 'results/discovery').glob('*/completion.json'):
+            if read_json(completion)['task']['path'] == 'src/route0.cpp':
+                metadata = read_json(completion.parent / 'metadata.json')
+                self.assertEqual(metadata['attempt'], 3)
+                self.assertTrue(metadata['session_id'].endswith('-3'))
+        self.assertEqual(len(list((self.base / 'diagnostics').rglob('failure.json'))), 4)
+        self.assertFalse((out / 'notifications.jsonl').exists())
+
+    def test_isolation_failure_is_private_deterministic_and_never_starts_a_model(self):
+        from common import AttemptError
+        error = AttemptError('configuration', 'worker_isolation', 'isolation_unavailable', False,
+                             'PRIVATE-ISOLATION-DETAIL')
+        with mock.patch('runner.verified_worker_prefix', side_effect=error):
+            self.assertEqual(self.run_review(), 1)
+        out = self.base / 'exhaustive-run'
+        self.assertFalse((self.state / 'events.jsonl').exists())
+        notices = (out / 'notifications.jsonl').read_text()
+        self.assertNotIn('PRIVATE-ISOLATION-DETAIL', notices)
+        self.assertTrue(all(json.loads(line)['attempts'] == 1 for line in notices.splitlines()))
+        self.assertTrue(all('PRIVATE-ISOLATION-DETAIL' in p.read_text()
+                            for p in (self.base / 'diagnostics').rglob('failure.json')))
+
+    def test_cli_usage_error_stops_after_one_attempt(self):
+        self.scenario({'codex': {'src/route0.cpp': {'always': 'usage'}}})
+        self.assertEqual(self.run_review(), 1)
+        notices = (self.base / 'exhaustive-run/notifications.jsonl').read_text().splitlines()
+        self.assertEqual(len(notices), 2)
+        self.assertTrue(all(json.loads(line)['category'] == 'configuration' and
+                            json.loads(line)['attempts'] == 1 and not json.loads(line)['retryable']
+                            for line in notices))
+
+    def test_diagnostics_must_be_disjoint_from_repository_results_and_inputs(self):
+        from runner import run
+        for root in (ROOT / 'diagnostics', self.base / 'exhaustive-run/diagnostics', self.repo / 'diagnostics',
+                     self.reference / 'diagnostics', self.base / 'exhaustive/diagnostics', self.base):
+            with self.subTest(root=root), self.assertRaises(ReviewError):
+                run(self.base / 'exhaustive', 'exhaustive', self.base / 'exhaustive-run', self.reference,
+                    lock_root=self.base / 'locks', diagnostics_root=root)
+        self.assertFalse((self.state / 'events.jsonl').exists())
 
     def test_candidates_from_both_models_are_deduplicated_and_verified_serially(self):
         a, b = finding("src/route0.cpp"), finding("src/route1.cpp", cause="Different parsing error")
@@ -253,7 +354,8 @@ class RunnerTests(unittest.TestCase):
             make_pilot_queue(self.base / mode, mode, queue)
             command = ['/bin/bash', str(ROOT / 'experiment/run-experiment.sh'), 'run', mode,
                        '--prepared', str(self.base / mode), '--out', str(self.base / (mode + '-shell')),
-                       '--reference', str(self.reference), '--queue', str(queue)]
+                       '--reference', str(self.reference), '--diagnostics-root', str(self.base / 'diagnostics'),
+                       '--queue', str(queue)]
             result = subprocess.run(command, capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(read_json(self.base / (mode + '-shell/status.json'))['state'], 'complete')
@@ -317,7 +419,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(list((out / 'results/discovery').iterdir()), [])
         self.scenario({})
         self.assertEqual(run(self.base / 'exhaustive', 'exhaustive', self.base / 'after-timeout',
-                             self.reference, lock_root=self.base / 'locks'), 0)
+                             self.reference, lock_root=self.base / 'locks', diagnostics_root=self.base / 'diagnostics'), 0)
 
     def test_changed_run_binding_and_overlapping_outputs_fail_before_cli(self):
         from runner import run
@@ -330,7 +432,8 @@ class RunnerTests(unittest.TestCase):
         other.mkdir()
         before = self.events()
         with self.assertRaises(ReviewError):
-            run(self.base / 'exhaustive', 'exhaustive', self.base / 'exhaustive-run', other)
+            run(self.base / 'exhaustive', 'exhaustive', self.base / 'exhaustive-run', other,
+                diagnostics_root=self.base / 'diagnostics', lock_root=self.base / 'locks')
         self.assertEqual(self.events(), before)
 
     def test_incomplete_completion_record_is_not_resumed(self):

@@ -123,25 +123,40 @@ portForwards:
 """
 
 
-def commands(config_path, versions, profile):
+def commands(config_path, versions, profile, name=VM_NAME):
     return [
-        ["limactl", "create", "--tty=false", f"--name={VM_NAME}", str(config_path)],
-        ["limactl", "start", "--tty=false", VM_NAME],
-        ["limactl", "shell", "--workdir=/", VM_NAME, "/bin/bash", "--noprofile", "--norc",
+        ["limactl", "create", "--tty=false", f"--name={name}", str(config_path)],
+        ["limactl", "start", "--tty=false", name],
+        ["limactl", "shell", "--workdir=/", name, "/bin/bash", "--noprofile", "--norc",
          "-s", "--", versions["codex"], versions["claude_code"], NODE_VERSION,
-         profile["node_sha256"], profile["lima"], profile["image_sha256"], profile["arch"]],
+         profile["node_sha256"], profile["lima"], profile["image_sha256"], profile["arch"], *([name] if name != VM_NAME else [])],
     ]
 
 
-def authentication_commands():
+def guest_setup_script(name=VM_NAME):
+    script = (EXPERIMENT / "guest-setup.sh").read_text(encoding="utf-8")
+    if name == "sonic-static-review-v2":
+        # Ship the real preflight and its dependency over the existing stdin
+        # transport. /mnt/source is the reviewed project, not this runner.
+        marker = "probe_sources = None  # BOOTSTRAP_WORKER_ISOLATION_SOURCES"
+        require(script.count(marker) == 1, "guest setup is missing its worker probe placeholder")
+        sources = {module: (EXPERIMENT / "src" / module).read_text(encoding="utf-8")
+                   for module in ("common.py", "diagnostics.py")}
+        script = script.replace(marker, f"probe_sources = {sources!r}")
+    return script
+
+
+def authentication_commands(name=VM_NAME):
     print("Manual authentication only (run later; never run by bootstrap):")
-    print(f"limactl shell --workdir=/home/audit {VM_NAME} codex login --device-auth")
-    print(f"limactl shell --workdir=/home/audit {VM_NAME} claude auth login")
+    print(f"limactl shell --workdir=/home/audit {name} codex login --device-auth")
+    print(f"limactl shell --workdir=/home/audit {name} claude auth login")
 
 
-def print_plan(paths, versions, guest_script, profile, allow_other_host):
+def print_plan(paths, versions, guest_script, profile, allow_other_host, name=VM_NAME):
     print("DRY RUN: no commands executed, downloads, files, or VM state changed.")
     print(f"Host profile: {profile['host']} (uname -s/-m).")
+    if name != VM_NAME:
+        print('Host: run locally on the intended Linux/x86_64 host; no remote commands are run.')
 
     print("Host: validate absolute existing, disjoint mount directories; results must be empty.")
     print("Host: pass only PATH, HOME, USER, LOGNAME, TMPDIR, LIMA_HOME, and LC_ALL=C to Lima.")
@@ -150,13 +165,13 @@ def print_plan(paths, versions, guest_script, profile, allow_other_host):
         print("Host: require qemu-system-x86_64 and qemu-img on PATH, outside all mounts.")
     print("Host: reject Lima _config/default.yaml and override.yaml (no inherited configuration).")
     print("Host: require Lima state and temporary scratch outside all mounts.")
-    print(f"Host: limactl list --quiet; refuse existing {VM_NAME} (including stopped VMs).")
+    print(f"Host: limactl list --quiet; refuse existing {name} (including stopped VMs).")
     print("Host: create a private mode-0700 temporary directory under the system temp directory/TMPDIR.")
     print("Host: write mode-0600 <scratch>/review-vm.yaml with exactly this content:")
     print("--- BEGIN LIMA YAML ---")
     print(render_config(paths, profile), end="")
     print("--- END LIMA YAML ---")
-    for command in commands("<scratch>/review-vm.yaml", versions, profile):
+    for command in commands("<scratch>/review-vm.yaml", versions, profile, name):
         print("Host: " + shlex.join(command))
     print("Guest: the shell command receives exactly this script on stdin:")
     print("--- BEGIN GUEST SCRIPT ---")
@@ -164,15 +179,15 @@ def print_plan(paths, versions, guest_script, profile, allow_other_host):
     print("--- END GUEST SCRIPT ---")
     print("Host: verify only setup-receipt.txt exists and observed versions match the pins.")
     print("Host: remove private scratch on success and failure.")
-    print(f"On create/start/setup/receipt failure or interruption: limactl delete --force {VM_NAME}")
+    print(f"On create/start/setup/receipt failure or interruption: limactl delete --force {name}")
     print("Remove any incomplete setup-receipt.txt. A retry starts from scratch, never repairs a VM.")
     print("Static-only: no source execution, builds/tests, Docker, virtual switches, or model agents.")
-    authentication_commands()
+    authentication_commands(name)
 
 
-def expected_receipt(versions, profile):
+def expected_receipt(versions, profile, name=VM_NAME):
     return {
-        "status": "ready", "lima": profile["lima"], "vm": VM_NAME,
+        "status": "ready", "lima": profile["lima"], "vm": name,
         "ubuntu_sha256": profile["image_sha256"], "guest_arch": profile["arch"],
         "node_sha256": profile["node_sha256"],
         "node_expected": NODE_VERSION, "node_observed": f"v{NODE_VERSION}",
@@ -183,7 +198,7 @@ def expected_receipt(versions, profile):
     }
 
 
-def verify_receipt(results, versions, profile):
+def verify_receipt(results, versions, profile, name=VM_NAME):
     receipt = results / "setup-receipt.txt"
     require(set(results.iterdir()) == {receipt}, "results must contain only setup-receipt.txt")
     require(not receipt.is_symlink() and receipt.is_file() and receipt.stat().st_size < 4096,
@@ -191,11 +206,15 @@ def verify_receipt(results, versions, profile):
     lines = receipt.read_text(encoding="utf-8").splitlines()
     pairs = [line.split("=", 1) for line in lines]
     require(all(len(pair) == 2 for pair in pairs), "invalid setup receipt")
-    require(len(pairs) == len(dict(pairs)) and dict(pairs) == expected_receipt(versions, profile),
+    require(len(pairs) == len(dict(pairs)) and dict(pairs) == expected_receipt(versions, profile, name),
             "setup receipt does not match pinned/observed versions")
 
 
-def create_vm(paths, versions, guest_script, profile, allow_other_host=False):
+def create_vm(paths, versions, guest_script, profile, allow_other_host=False, name=VM_NAME):
+    require(name in (VM_NAME, 'sonic-static-review-v2'), 'unsupported VM name')
+    if name != VM_NAME:
+        require(profile['host'] == 'Linux/x86_64',
+                'sonic-static-review-v2 must be created locally on a Linux/x86_64 host')
     # Pass Lima a fixed, minimal environment: provider tokens, SSH_AUTH_SOCK,
     # shell startup overrides, and proxy settings are not forwarded.
     env = {key: os.environ[key] for key in ("PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LIMA_HOME")
@@ -216,22 +235,22 @@ def create_vm(paths, versions, guest_script, profile, allow_other_host=False):
     require(not any(Path(lima).is_relative_to(p) for p in paths),
             "limactl must not be an executable from a mounted input/results directory")
     if profile["vm_type"] == "qemu":
-        for name in ("qemu-system-x86_64", "qemu-img"):
-            binary = shutil.which(name, path=env.get("PATH", os.defpath))
-            require(binary is not None, f"QEMU prerequisite {name} is unavailable; install it manually")
+        for tool_name in ("qemu-system-x86_64", "qemu-img"):
+            binary = shutil.which(tool_name, path=env.get("PATH", os.defpath))
+            require(binary is not None, f"QEMU prerequisite {tool_name} is unavailable; install it manually")
             require(not any(Path(binary).resolve().is_relative_to(p) for p in paths),
-                    f"{name} must not be an executable from a mounted input/results directory")
+                    f"{tool_name} must not be an executable from a mounted input/results directory")
     observed = run(["--version"], stdout=subprocess.PIPE).stdout.strip()
     require(observed == f"limactl version {profile['lima']}",
             f"Lima version mismatch: require {profile['lima']}, got {observed}")
-    for name in ("default.yaml", "override.yaml"):
-        path = lima_home / "_config" / name
+    for config_name in ("default.yaml", "override.yaml"):
+        path = lima_home / "_config" / config_name
         require(not path.exists() and not path.is_symlink(),
-                f"refusing inherited Lima configuration: {name}; use a clean LIMA_HOME")
+                f"refusing inherited Lima configuration: {config_name}; use a clean LIMA_HOME")
     names = run(["list", "--quiet"], stdout=subprocess.PIPE).stdout.splitlines()
-    require(VM_NAME not in names and not (lima_home / VM_NAME).exists()
-            and not (lima_home / VM_NAME).is_symlink(),
-            f"VM {VM_NAME} already exists; refusing to repair or replace it")
+    require(name not in names and not (lima_home / name).exists()
+            and not (lima_home / name).is_symlink(),
+            f"VM {name} already exists; refusing to repair or replace it")
 
     attempted = False
     results = paths[2]
@@ -253,25 +272,25 @@ def create_vm(paths, versions, guest_script, profile, allow_other_host=False):
             with config_path.open("x", encoding="utf-8") as stream:
                 os.chmod(config_path, 0o600)
                 stream.write(render_config(paths, profile))
-            create, start, setup = commands(config_path, versions, profile)
+            create, start, setup = commands(config_path, versions, profile, name)
             attempted = True  # Failed create can already have allocated VM state.
             run(create[1:])
             run(start[1:])
             run(setup[1:], input=guest_script)
-            verify_receipt(results, versions, profile)
-        print(f"Created {VM_NAME}; verified {results / 'setup-receipt.txt'}.")
-        authentication_commands()
+            verify_receipt(results, versions, profile, name)
+        print(f"Created {name}; verified {results / 'setup-receipt.txt'}.")
+        authentication_commands(name)
     except BaseException:
         if attempted:
-            print(f"Bootstrap failed; destroying {VM_NAME}. A retry starts from scratch.", file=sys.stderr)
+            print(f"Bootstrap failed; destroying {name}. A retry starts from scratch.", file=sys.stderr)
             # Finish cleanup even if a second Ctrl-C arrives.
             old_handlers = {sig: signal.signal(sig, signal.SIG_IGN)
                             for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)}
             try:
                 try:
-                    run(["delete", "--force", VM_NAME])
+                    run(["delete", "--force", name])
                 except (OSError, subprocess.CalledProcessError):
-                    print(f"ERROR: VM deletion failed. Run `limactl delete --force {VM_NAME}` "
+                    print(f"ERROR: VM deletion failed. Run `limactl delete --force {name}` "
                           "before retrying; do not reuse the partial VM.", file=sys.stderr)
                 receipt = results / "setup-receipt.txt"
                 if receipt.is_file() or receipt.is_symlink():
@@ -287,6 +306,7 @@ def main(argv=None):
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true", help="print the complete plan without mutation")
     mode.add_argument("--create", action="store_true", help="create a fresh VM and install pinned guest CLIs")
+    parser.add_argument("--name", choices=(VM_NAME, "sonic-static-review-v2"), default=VM_NAME)
     parser.add_argument("--allow-other-host", action="store_true",
                         help="explicitly permit creation away from host u (supported hosts only)")
     for name in ("source", "reference", "results"):
@@ -301,11 +321,11 @@ def main(argv=None):
         require("guest_cli_versions" in config, "config.json requires guest_cli_versions")
         versions = config["guest_cli_versions"]
         paths = mount_paths(values) if all(values) else tuple(map(Path, PLACEHOLDERS))
-        guest_script = (EXPERIMENT / "guest-setup.sh").read_text(encoding="utf-8")
+        guest_script = guest_setup_script(args.name)
         if args.dry_run:
-            print_plan(paths, versions, guest_script, profile, args.allow_other_host)
+            print_plan(paths, versions, guest_script, profile, args.allow_other_host, args.name)
         else:
-            create_vm(paths, versions, guest_script, profile, args.allow_other_host)
+            create_vm(paths, versions, guest_script, profile, args.allow_other_host, args.name)
     except (ReviewError, OSError, ValueError, subprocess.CalledProcessError, KeyboardInterrupt) as exc:
         print(f"ERROR: {exc or 'bootstrap interrupted'}", file=sys.stderr)
         return 1

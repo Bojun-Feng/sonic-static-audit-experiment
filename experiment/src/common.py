@@ -12,6 +12,18 @@ class ReviewError(Exception):
     """An invalid input or incomplete artifact set."""
 
 
+class AttemptError(ReviewError):
+    """A bounded public reason plus a private diagnostic message."""
+
+    def __init__(self, category, stage, reason, retryable, detail):
+        super().__init__(detail)
+        self.category, self.stage, self.reason = category, stage, reason
+        self.retryable = retryable
+
+    def summary(self):
+        return {key: getattr(self, key) for key in ('category', 'stage', 'reason', 'retryable')}
+
+
 EXTENSIONS = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}
 EXCLUDED = {
     "test", "tests", "unittest", "unittests", "unit_test", "unit_tests",

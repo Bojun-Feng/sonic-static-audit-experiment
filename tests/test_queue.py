@@ -1,6 +1,7 @@
 """Production queue and explicit pilot selection contracts."""
 import importlib.util
 import io
+import json
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 import sys
@@ -77,6 +78,30 @@ class QueueTests(unittest.TestCase):
                 build_tasks(prepared, "exhaustive", queue)
         with self.assertRaises(ReviewError):
             build_tasks(prepared, "targeted")
+
+    def test_recovery_queue_uses_only_failed_task_ids_and_new_preparation(self):
+        from review_queue import build_tasks, make_recovery_queue
+        for mode in ('exhaustive', 'targeted'):
+            prepared = self.base / mode
+            full = build_tasks(prepared, mode)
+            chosen = [task['task_id'] for task in full[2:14:2]]
+            notices = self.base / (mode + '-notifications.jsonl')
+            notices.write_text(''.join(json.dumps({'lane': 'discovery', 'task_id': task,
+                                                   'attempts': 2, 'error': 'ReviewError'}) + '\n'
+                                       for task in chosen))
+            queue = self.base / (mode + '-recovery.json')
+            make_recovery_queue(prepared, mode, queue, notices, chosen)
+            tasks = build_tasks(prepared, mode, queue)
+            self.assertEqual(len(tasks), 12)
+            self.assertEqual({t['unit_id'] for t in tasks}, {t['unit_id'] for t in full[2:14]})
+            self.assertTrue(all(t in full for t in tasks))
+            for bad in (chosen[:-1], chosen[:5] + [chosen[0]], chosen[:5] + [full[-1]['task_id']],
+                        chosen[:5] + [chosen[0].replace('gpt-6-astra', 'unknown-model')]):
+                with self.assertRaises(ReviewError):
+                    make_recovery_queue(prepared, mode, self.base / 'bad.json', notices, bad)
+            notices.write_text(json.dumps({'lane': 'verifier', 'task_id': chosen[0]}) + '\n')
+            with self.assertRaises(ReviewError):
+                make_recovery_queue(prepared, mode, self.base / 'bad.json', notices, chosen)
 
 
 if __name__ == "__main__":

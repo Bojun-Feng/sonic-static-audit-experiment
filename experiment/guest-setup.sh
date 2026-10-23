@@ -2,7 +2,7 @@
 # Sent on stdin to the fresh guest. Never execute this script on the host.
 set -euo pipefail
 umask 077
-[[ $# -eq 7 ]] || { printf 'ERROR: expected seven pinned setup arguments\n' >&2; exit 2; }
+[[ $# -eq 7 || $# -eq 8 ]] || { printf 'ERROR: expected seven pinned setup arguments and optional VM name\n' >&2; exit 2; }
 codex_version=$1
 claude_version=$2
 node_version=$3
@@ -10,6 +10,8 @@ node_sha256=$4
 lima_version=$5
 image_sha256=$6
 guest_arch=$7
+vm_name=${8:-sonic-static-audit}
+[[ $vm_name == sonic-static-audit || $vm_name == sonic-static-review-v2 ]] || exit 2
 case "$guest_arch" in
     x86_64) node_arch=x64 ;;
     aarch64) node_arch=arm64 ;;
@@ -28,6 +30,54 @@ trap 'rm -rf -- "$guest_work"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM HUP
 export DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+
+# Worker isolation for the new VM only.
+if [[ $vm_name == sonic-static-review-v2 ]]; then
+    [[ $(id -u) -ne 0 ]] || {
+        printf 'ERROR: worker isolation must be checked as the unprivileged guest user\n' >&2
+        exit 1
+    }
+    # Install bubblewrap and required dependencies from the image's Ubuntu repositories.
+    sudo apt-get -o APT::Update::Error-Mode=any update
+    sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends bubblewrap
+
+    # Ubuntu's AppArmor restriction otherwise denies the runner's user namespace.
+    # Persist and apply only this new guest's setting; do not reload other sysctls.
+    cat > "$guest_work/worker-userns.conf" <<'SYSCTL'
+kernel.apparmor_restrict_unprivileged_userns=0
+SYSCTL
+    sudo install -m 0644 "$guest_work/worker-userns.conf" /etc/sysctl.d/99-sonic-static-review-userns.conf
+    sudo sysctl -p /etc/sysctl.d/99-sonic-static-review-userns.conf
+    [[ $(sysctl -n kernel.apparmor_restrict_unprivileged_userns) == 0 ]] || {
+        printf 'ERROR: guest unprivileged user namespaces remain restricted\n' >&2
+        exit 1
+    }
+
+    # The planner embeds our own modules, not code from the reviewed source mount.
+    # Run the same sentinel probe as the runner, without sudo, before any receipt.
+    python3 -I -B - "$guest_work" <<'WORKER_PROBE'
+from pathlib import Path
+import sys
+import tempfile
+
+probe_sources = None  # BOOTSTRAP_WORKER_ISOLATION_SOURCES
+if probe_sources is None:
+    raise SystemExit("ERROR: worker probe must be supplied by the bootstrap planner")
+modules = Path(sys.argv[1]) / "worker-probe"
+modules.mkdir(mode=0o700)
+for name, source in probe_sources.items():
+    (modules / name).write_text(source, encoding="utf-8")
+sys.path.insert(0, str(modules))
+from common import AttemptError
+from diagnostics import verified_worker_prefix
+
+with tempfile.TemporaryDirectory(prefix="review-isolation-", dir="/var/tmp") as directory:
+    try:
+        verified_worker_prefix(Path(directory), tuple(map(Path, ("/mnt/source", "/mnt/references", "/mnt/results"))))
+    except AttemptError as exc:
+        raise SystemExit(f"ERROR: guest worker isolation preflight failed: {exc}") from exc
+WORKER_PROBE
+fi
 
 # Ubuntu cloud images supply Python, CA certificates, tar, and gzip. Install a
 # checksummed Node binary; no apt upgrade, source build, or unpinned installer.
@@ -80,16 +130,17 @@ claude_observed=$(claude --version)
 [[ $codex_observed == "codex-cli $codex_version" ]]
 [[ $claude_observed == "$claude_version (Claude Code)" ]]
 
-# Publish the only result after all installations and version checks succeed.
+# Publish the only result after all installations, version checks, and any
+# required worker isolation probe succeed.
 # Exclusive creation prevents overwriting existing results; host cleanup removes
 # an incomplete receipt on any subsequent failure, including lost transport.
 python3 - "$lima_version" "$image_sha256" "$guest_arch" "$node_sha256" "$node_version" "$node_observed" \
-    "$codex_version" "$codex_observed" "$claude_version" "$claude_observed" <<'PY'
+    "$codex_version" "$codex_observed" "$claude_version" "$claude_observed" "$vm_name" <<'PY'
 from pathlib import Path
 import os
 import sys
 keys = ("lima", "ubuntu_sha256", "guest_arch", "node_sha256", "node_expected", "node_observed", "codex_expected",
-        "codex_observed", "claude_code_expected", "claude_code_observed")
+        "codex_observed", "claude_code_expected", "claude_code_observed", "vm")
 values = {"status": "ready", "vm": "sonic-static-audit", **dict(zip(keys, sys.argv[1:])),
           "authentication": "not-run", "static_only": "true"}
 results = Path("/mnt/results")

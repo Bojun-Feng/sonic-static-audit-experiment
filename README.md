@@ -82,39 +82,69 @@ probe with this mode retained a completed native command event and source output
 In this mode Codex itself does not restrict file access; the source and reference
 inputs stay read-only because the VM mounts them read-only. Verifier tools remain
 limited to Read/Grep/Glob. Prompts still exclude source execution, tests, builds,
-network tools, and source edits, and the required command-trace validator is
-unchanged.
+network tools, and source edits. Retained command output is checked against actual
+source bytes.
 
 Each review unit gets fresh sessions for both models in `runner-config.json`.
 Kernel file locks enforce sixteen discovery sessions and one verifier session
 across runner processes for the Unix user, independent of mode or output path.
-A failed or incomplete session retries in a fresh working directory. Only a
-validated final success is atomically moved to `results/discovery/TASK` or
-`results/verifier/CANDIDATE`, with trace, result, prompt, native usage metadata,
-and a completion record. Temporary failed traces are removed.
+Retryable transport, session, result, or inspection-evidence failures get up to
+**three total attempts** (the default), each with a fresh ephemeral session and
+working directory. Missing CLIs, unavailable isolation, invalid local
+configuration (including CLI usage exit status 2), verifier model mismatch, and
+local storage errors stop immediately. Only a validated
+success is atomically published to `results/discovery/TASK` or
+`results/verifier/CANDIDATE`, with its original successful trace, result, prompt,
+native usage metadata, and completion record. Failed attempts never become
+successful evidence.
 
-Discovery acceptance requires source inspection in the native Codex JSONL trace,
-even for an empty candidate list. Before the final answer, the session must retain
-two distinct successful `item.completed` / `command_execution` records (nonempty
-IDs, `status: completed`, integer `exit_code: 0`, and source output):
+Pass `--diagnostics-root /absolute/private/review-diagnostics` to choose a
+persistent runner-host-local diagnostics directory. The default is
+`/var/tmp/sonic-static-review-diagnostics-<uid>`. It must be owned by the runner,
+mode 0700, and outside/disjoint from this repository, the results tree, source,
+prepared inputs, and references. Do not mount it into another VM or share it
+with discovery workers. All runners sharing the global slots bind to the same
+root; a different root is refused. Keep it stable across runs. `TMPDIR` must
+also be outside the repository, results, and input directories.
 
-- `cat -- ABSOLUTE_ASSIGNED_FILE`: output must equal the entire assigned file.
-- `rg -n -F -- IDENTIFIER ABSOLUTE_SOURCE_ROOT`: a literal context search for an
-  identifier from the assigned file (at least three characters, excluding common
-  language keywords). Each retained match must name an existing file inside the
-  source root, with its actual line number and matching text. At least one match
-  must be C/C++ source or a header; documentation matches alone do not qualify.
+Raw stdout/stderr go directly into private attempt directories, including during
+execution. Failed attempts retain their prompt, native trace, stderr, workspace,
+and `failure.json` with exact stage, reason, exception detail, and traceback.
+`attempt.json` records the latest stage even if an attempt is interrupted.
+Successful artifacts are copied through a fixed allowlist, then their private
+scratch is removed. No environment dump is collected. The public notification
+contains only lane, task ID, actual attempt count, category, stage, reason, and
+retryability; no raw provider text or private diagnostic path is copied into it.
 
-These exact command forms are the executable evidence contract; paths and the
-identifier may be shell-quoted, and the native CLI may wrap a command in
-`sh`, `bash`, or `zsh` with `-c` or `-lc`. Pipelines, redirections, combined
-commands, directory listings, source cards, prose claims, failed reads, and
-truncated output do not substitute for these records. Additional read-only
-inspection is encouraged. Choose a meaningful symbol to explore callers,
-definitions, or guards; when no external references exist, search hits in the
-assigned file and its full read supply local context. This gate proves recorded
-source access and a source-backed context search, not semantic review quality or
-complete caller coverage. The runner never executes commands from saved traces.
+The runner enforces the diagnostic boundary for both model lanes. Linux requires
+**bubblewrap (`bwrap`) and usable user/PID namespaces on the runner host**;
+these are operator prerequisites, separate from the pinned model CLI bootstrap.
+It masks diagnostics with an empty read-only mount and hides parent process
+filesystem handles with a private PID namespace. macOS uses `sandbox-exec` to
+deny diagnostic reads/writes and access to other processes. A local canary probe
+runs before any model invocation; unavailable isolation fails without calling a
+provider. Permissions or prompt instructions alone are not the worker boundary.
+The source and reference mounts remain read-only as before.
+
+Discovery acceptance requires successful native `command_execution` events before
+the final answer, including for an empty candidate list. The retained output must
+cover the assigned file and show related source context. Whole reads, numbered
+reads, or multiple complete ranges can establish coverage. Accepted forms include
+`cat` (with or without `--`), `sed -n` ranges, `nl -ba`, and `head`/`tail` ranges.
+Numbered `rg` and `grep` searches can use different flag spellings, literal or
+regular-expression patterns, and source directories or specific files. Reads of
+related C/C++ source containing an assigned-file identifier also establish
+context. Local search hits suffice when there are no external references.
+
+Paths can be absolute or source-relative, including after `cd SOURCE && ...`;
+`sh`/`bash`/`zsh` wrappers are recognized. A search bounded by `head -n N` can still
+show context. Every counted line is checked against source bytes and line
+numbers. Reads must retain their complete requested ranges, with all assigned
+lines covered across reads. At least two distinct successful command events are
+required. No-tool sessions, listings, prose claims, source cards, failed reads,
+unrelated content, and fabricated/truncated evidence do not establish coverage.
+The validator never executes saved commands. This proves recorded source access
+and related context, not semantic review quality or complete caller coverage.
 
 Resume checks the native trace again after verifying artifact hashes; a valid
 completion record alone cannot authorize passive results. Historical traces
@@ -150,6 +180,41 @@ to exercise the shared global 16-slot discovery limit; a single twelve-session
 arm cannot saturate it. Verifier concurrency remains one across both arms.
 Supply six `--path` arguments to choose explicit paths instead of the
 first six available units. No VM operations are performed by the runner.
+
+To select six **previously failed** review units, use only the historical full
+run's `notifications.jsonl` and the new preparation; old failed traces are not
+needed or opened:
+
+```sh
+python3 -B experiment/src/review_queue.py \
+  --prepared /path/to/new-prepared --mode targeted --out /path/to/recovery-queue.json \
+  --notifications /path/to/historical-full-run/notifications.jsonl \
+  --task-id "$FAILED_TASK_1" --task-id "$FAILED_TASK_2" --task-id "$FAILED_TASK_3" \
+  --task-id "$FAILED_TASK_4" --task-id "$FAILED_TASK_5" --task-id "$FAILED_TASK_6"
+./experiment/run-experiment.sh run targeted \
+  --prepared /path/to/new-prepared --queue /path/to/recovery-queue.json \
+  --reference /path/to/references --out /path/to/new-pilot-run \
+  --diagnostics-root /absolute/private/review-diagnostics
+```
+
+The six IDs must be historical discovery failures mapping to six distinct current
+units. Unavailable/stale IDs, wrong modes/models, and duplicate units are refused.
+Both configured models are queued for every selected unit, including when only
+one model previously failed. The pilot uses the production runner unchanged.
+
+Export only validated publishable outputs with the allowlist helper:
+
+```sh
+python3 -B experiment/src/export_results.py --run /path/to/new-pilot-run --out /path/to/review-results.tar.gz
+```
+
+It requires a finished, unlocked run and checks completion inventories and
+artifact hashes. The archive includes run/status metadata, bounded notifications,
+validated success artifacts, and candidate JSON/Markdown. It never walks arbitrary
+output subtrees or follows symlinks/hardlinks. Scratch, private diagnostics,
+locks, and unknown files are excluded. Broad historical failure notices cannot
+be exported with this helper. Do not archive a workspace with a recursive tar or
+copy command; use this allowlist. Export is local and does not publish to GitHub.
 
 For an archive without Git metadata, `source_identity.py --repo DIR --commit SHA --out FILE` creates an
 immutable identity file attesting the snapshot bytes and the supplied known
@@ -235,7 +300,7 @@ Validation prints `PASS` or `FAIL` and returns nonzero for invalid state.
 
 ## Plan or create the review VM
 
-VMs must be created on host **`u`** unless explicitly overridden. The bootstrap
+The new VM `sonic-static-review-v2` must be created locally on host **`u`**. The bootstrap
 reads the kernel fields for `uname -s` and `uname -m` (via Python's `os.uname`)
 and selects exactly one supported profile; it never guesses from installed tools:
 
@@ -260,16 +325,19 @@ For a later, explicitly requested creation, run on **`u`** with Lima **2.0.3**
 and QEMU already installed:
 
 ```sh
-./experiment/bootstrap-lima.sh --create \
+./experiment/bootstrap-lima.sh --create --name sonic-static-review-v2 \
   --source /absolute/path/to/sonic-swss \
   --reference /absolute/path/to/reference-materials \
   --results /absolute/path/to/review-results
 ```
 
-Run the bootstrap locally on the intended Linux host. The command validates the detected architecture and version pins before creating the VM.
-Apple Silicon creation requires this flag. Dry-run works on the supported Mac
-without an override and prints its ARM64 profile, the host policy, and override
-status. There is no option to select a foreign host profile.
+Run the bootstrap locally on the intended Linux host. The command validates the
+detected architecture and version pins before creating the VM.
+The optional name defaults to the legacy `sonic-static-audit`; its existing
+behavior and profiles are preserved. The new name requires Linux/x86_64 on `u`
+(or its fully qualified hostname), even with `--allow-other-host`. Dry-run on a
+supported Mac can preview either name without creating a VM. There is no option
+to select a foreign host profile. The wrapper contains no remote-access command.
 
 All three paths must be existing, absolute, disjoint directories; results must
 be empty. Home directories, the repository parent, hidden directories, and
@@ -279,7 +347,7 @@ no paths it uses labeled placeholders. Dry-run never invokes Lima, downloads,
 creates scratch files, or changes VM state. No-argument invocation is an error.
 
 The [create command](https://lima-vm.io/docs/reference/limactl_create/) uses a
-literal config for VM `sonic-static-audit`, with the profile's explicit resources
+literal config for the selected VM name, with the profile's explicit resources
 and Ubuntu 24.04 image dated 2026-10-17, verified against its architecture-specific
 [SHA-256](https://cloud-images.ubuntu.com/releases/noble/release-20261017/SHA256SUMS).
 Linux explicitly selects [QEMU](https://lima-vm.io/docs/config/vmtype/qemu/) and
@@ -306,12 +374,21 @@ exact npm versions in `experiment/config.json`: Codex **0.157.1** and Claude Cod
 postinstall remains enabled to fetch its pinned platform binary. No package
 source compilation is allowed. CLI wrappers disable automatic updates.
 
-Guest setup runs only version probes, verifies them against the pins, and writes
-`/mnt/results/setup-receipt.txt`, including the guest architecture and Node archive
-checksum. Host validation requires that final receipt to be the only result and
+For `sonic-static-review-v2`, setup also installs Ubuntu's `bubblewrap` package
+and persists `kernel.apparmor_restrict_unprivileged_userns=0` in
+`/etc/sysctl.d/99-sonic-static-review-userns.conf` inside the new guest. It applies
+and reads back that setting, then runs the runner's exact `verified_worker_prefix()`
+sentinel probe as the unprivileged guest user. The planner sends its local probe
+modules over stdin; no code is imported from the reviewed source mount. Package,
+sysctl, or isolation failures abort setup before the ready receipt. The default
+legacy setup skips these steps; existing VMs are still refused.
+
+Guest setup verifies CLI versions against the pins and writes
+`/mnt/results/setup-receipt.txt`, including the selected VM name, guest
+architecture, and Node archive checksum. Host validation requires that final receipt to be the only result and
 match the selected profile and CLI pins. A failure during creation, start, setup,
-receipt validation, or a caught interrupt destroys the new VM, removes an incomplete receipt, and
-cleans temporary config. **A retry starts from scratch.** It never patches or
+receipt validation, or a caught interrupt destroys the new VM, removes an
+incomplete receipt, and cleans temporary config. **A retry starts from scratch.** It never patches or
 repairs an existing VM. If Lima itself cannot delete the VM, the script fails
 with the exact manual delete command; do not reuse that partial VM. Unexpected
 user files in results are reported, never silently deleted.
@@ -319,8 +396,8 @@ user files in results are reported, never silently deleted.
 After successful setup, the script prints these manual commands:
 
 ```sh
-limactl shell --workdir=/home/audit sonic-static-audit codex login --device-auth
-limactl shell --workdir=/home/audit sonic-static-audit claude auth login
+limactl shell --workdir=/home/audit sonic-static-review-v2 codex login --device-auth
+limactl shell --workdir=/home/audit sonic-static-review-v2 claude auth login
 ```
 
 [Codex device auth](https://developers.openai.com/codex/cli/reference/) and
@@ -333,26 +410,30 @@ remains local-only; explicit VM creation downloads its image and pinned tooling.
 ## Local verification
 
 ```sh
-mkdir -p results/local-test-tmp
-TMPDIR="$PWD/results/local-test-tmp" python3 -B -m unittest discover -s tests -v
+python3 -B -m unittest discover -s tests -v
 bash -n experiment/bootstrap-lima.sh
 bash -n experiment/guest-setup.sh
 bash -n experiment/run-experiment.sh
 ./experiment/bootstrap-lima.sh --dry-run
-rmdir results/local-test-tmp
+./experiment/bootstrap-lima.sh --dry-run --name sonic-static-review-v2
+git diff --check
 ```
 
 Tests use disposable OS temporary directories (or the caller's `TMPDIR`) for all
-fixtures and outputs, with output outside each source fixture. The commands above
-keep every test write inside this repository; `TMPDIR` must be an absolute path
-with no hidden directory components because mount validation rejects those.
+fixtures and outputs, with output outside each source fixture. Keep `TMPDIR`
+outside this repository and results so the diagnostic boundary is exercised. It must be an absolute path with no hidden directory components because
+mount validation rejects those.
 Tests never use `results/exhaustive` or `results/targeted`; generated baseline results are not
 retained in this repository. The suite exercises both preparation commands,
 deterministic filtering/extraction/validation, mocked ast-grep, and mocked Lima
 creation, refusal, rendering, receipt validation, and failure cleanup under both
-Linux/x86_64 and macOS/arm64 identities. It also checks the `u` host restriction
-and explicit override, unsupported hosts, QEMU prerequisites, exact profile pins,
-and mutation-free dry-runs. Both profiles are tested locally with mocked kernel
+Linux/x86_64 and macOS/arm64 identities. It also checks the new VM name and `u`
+restriction, legacy behavior, unsupported hosts, QEMU prerequisites, exact
+profile pins, and mutation-free dry-runs. Both profiles are tested locally with mocked kernel
 identity; verification never connects to `u`. C/C++ fixtures are text only, never
-compiled or executed. No VM or real provider CLI
-is used in verification. Tests need only the Python standard library and Bash.
+compiled or executed. No VM or real provider CLI is used in verification. Tests
+need only the Python standard library and Bash. Fake model CLIs bypass
+OS isolation through test-only mocks; separate tests verify the isolation command,
+probe, and refusal contracts. They do not prove a host's kernel namespace support.
+The production preflight must succeed on the eventual runner host. Nested macOS
+sandbox execution may be unavailable inside a managed development environment.

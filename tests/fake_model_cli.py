@@ -78,7 +78,9 @@ if kind == "codex" and scenario.get("start_gate"):
         time.sleep(0.01)
 time.sleep(scenario.get("sleep", 0.06))
 behavior = scenario.get(kind, {}).get(model + ":" + path, scenario.get(kind, {}).get(path, {}))
-failure = behavior.get("always") or (behavior.get("first") if attempt == 1 else None)
+failures = behavior.get('failures', [])
+failure = behavior.get("always") or (failures[attempt - 1] if attempt <= len(failures) else
+                                     behavior.get("first") if attempt == 1 else None)
 session = f"{kind}-{key}-{attempt}"
 if kind == "codex":
     answer = {"candidates": behavior.get("candidates", [])}
@@ -92,6 +94,10 @@ if kind == "codex":
         commands = [(["cat", "--", str(root / path)], None),
                     (["rg", "-n", "-F", "--", "key", str(root)],
                      ["grep", "-r", "-n", "-F", "--", "key", str(root)])]
+        if behavior.get('inspection') == 'ranges':
+            commands = [(['sed', '-n', '1,1p', str(root / path)], None),
+                        (['sed', '-n', '2,$p', str(root / path)], None),
+                        (['grep', '-Rn', 'key', str(root)], None)]
         for number, (argv, local) in enumerate(commands):
             result = subprocess.run(local or argv, capture_output=True, text=True, check=True)
             emit({"type": "item.completed", "item": {"id": f"inspection-{number}",
@@ -116,4 +122,4 @@ else:
               "structured_output": verdict, "usage": {"input_tokens": 70, "cache_read_input_tokens": 10},
               "modelUsage": {model: {"inputTokens": 70, "outputTokens": 9}}, "total_cost_usd": 0.01})
 event("end")
-sys.exit(1 if failure == "exit" else 0)
+sys.exit(2 if failure == 'usage' else 1 if failure == "exit" else 0)

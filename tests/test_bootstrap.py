@@ -1,5 +1,7 @@
 """Offline bootstrap tests: only a fake limactl, never a VM or provider CLI."""
 
+import ast
+import contextlib
 import copy
 import hashlib
 import io
@@ -82,7 +84,7 @@ elif command == "create":
     assert stat.S_IMODE(config.stat().st_mode) == 0o600
     (base / "config-path.txt").write_text(str(config))
     (base / "captured.yaml").write_text(config.read_text())
-    (base / "lima-state" / "sonic-static-audit").mkdir()
+    (base / "lima-state" / args[2].split('=', 1)[1]).mkdir()
     if scenario.get("fail") == command:
         sys.exit(23)
 elif command == "start":
@@ -103,7 +105,7 @@ elif command == "shell":
     if scenario.get("extra_result"):
         (result.parent / "unexpected.log").write_text("extra")
 elif command == "delete":
-    (base / "lima-state" / "sonic-static-audit").rmdir()
+    (base / "lima-state" / args[-1]).rmdir()
 else:
     raise AssertionError(args)
 ''')
@@ -302,6 +304,58 @@ else:
         self.assertEqual([c["args"][0] for c in self.calls()], ["--version", "list"])
         self.assert_clean_scratch()
 
+    def test_named_vm_plan_receipt_and_existing_legacy_vm_are_independent(self):
+        name = 'sonic-static-review-v2'
+        legacy = self.lima_state / bootstrap.VM_NAME
+        legacy.mkdir()
+        (legacy / 'keep.txt').write_text('existing VM state')
+        self.scenario_is(existing=bootstrap.VM_NAME)
+        plan = self.invoke('--dry-run', '--name', name, *self.path_args())
+        self.assertEqual(plan.returncode, 0, plan.stderr)
+        self.assertIn('--name=' + name, plan.stdout)
+        self.assertIn('limactl delete --force ' + name, plan.stdout)
+        receipt = bootstrap.expected_receipt(self.versions, self.profile, name)
+        (self.base / 'expected-receipt.txt').write_text(''.join(f'{k}={v}\n' for k, v in receipt.items()))
+        result = self.create('--name', name, *self.path_args())
+        if self.HOST[0] == 'Darwin':
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('Linux/x86_64', result.stderr)
+            self.assertEqual(self.calls(), [])
+        else:
+            self.assertEqual(result.returncode, 0, result.stderr)
+            bootstrap.verify_receipt(self.paths[2], self.versions, self.profile, name)
+            self.assertEqual(self.calls()[2]['args'][2], '--name=' + name)
+            self.assertEqual(self.calls()[-1]['args'][-1], name)
+            planned_guest = plan.stdout.split('--- BEGIN GUEST SCRIPT ---\n')[1].split(
+                '--- END GUEST SCRIPT ---')[0]
+            self.assertEqual((self.base / 'guest.sh').read_text(), planned_guest)
+            self.assertIn(name + ' codex login', result.stdout)
+        self.assertEqual((legacy / 'keep.txt').read_text(), 'existing VM state')
+        self.assertFalse(any(c['args'][0] in ('start', 'shell', 'delete') and
+                             bootstrap.VM_NAME in c['args'] for c in self.calls()))
+        self.assert_clean_scratch()
+
+    def test_named_vm_cleanup_and_host_policy(self):
+        name = 'sonic-static-review-v2'
+        host = ['Linux', 'u', 'test-release', 'test-version', 'x86_64']
+        self.scenario_is(host=host, version='2.0.3', fail='shell')
+        legacy = self.lima_state / bootstrap.VM_NAME
+        legacy.mkdir()
+        result = self.invoke('--create', '--name', name, *self.path_args())
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.calls()[-1]['args'], ['delete', '--force', name])
+        self.assertTrue(legacy.is_dir())
+        self.assertFalse((self.lima_state / name).exists())
+        host[1] = 'other-host'
+        self.scenario_is(host=host, version='2.0.3')
+        with mock.patch.object(bootstrap.os, 'uname', return_value=os.uname_result(host)):
+            linux_profile = bootstrap.host_profile()
+        receipt = bootstrap.expected_receipt(self.versions, linux_profile, name)
+        (self.base / 'expected-receipt.txt').write_text(''.join(f'{k}={v}\n' for k, v in receipt.items()))
+        result = self.invoke('--create', '--name', name, '--allow-other-host', *self.path_args())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(any(c['args'][:2] == ['create', '--tty=false'] for c in self.calls()))
+
     def test_partial_existing_state_and_global_overrides_are_refused(self):
         vm = self.lima_state / bootstrap.VM_NAME
         vm.mkdir()
@@ -499,10 +553,194 @@ else:
                 exec(compile(blocks[1], "guest-receipt", "exec"), {})
             self.assertEqual((self.paths[2] / "setup-receipt.txt").read_bytes(), before)
 
+    def test_guest_receipt_uses_the_selected_new_vm_name(self):
+        guest = (ROOT / 'experiment/guest-setup.sh').read_text()
+        receipt_code = guest.split("<<'PY'\n")[-1].split('\nPY\n')[0]
+        name = 'sonic-static-review-v2'
+        expected = bootstrap.expected_receipt(self.versions, self.profile, name)
+        fields = ('lima', 'ubuntu_sha256', 'guest_arch', 'node_sha256', 'node_expected', 'node_observed',
+                  'codex_expected', 'codex_observed', 'claude_code_expected', 'claude_code_observed', 'vm')
+        args = ['-', *[expected[key] for key in fields]]
+        with mock.patch.object(sys, 'argv', args), \
+                mock.patch.dict(sys.modules, {'pathlib': SimpleNamespace(Path=lambda path: self.paths[2])}):
+            exec(compile(receipt_code, 'guest-receipt', 'exec'), {})
+        bootstrap.verify_receipt(self.paths[2], self.versions, self.profile, name)
+        with self.assertRaises(ReviewError):
+            bootstrap.verify_receipt(self.paths[2], self.versions, self.profile)
+
 
 class MacOSBootstrapTests(BootstrapTests):
     HOST = ("Darwin", "test-mac", "test-release", "test-version", "arm64")
     CREATE_FLAGS = ("--allow-other-host",)
+
+
+class GuestProvisioningTests(unittest.TestCase):
+    """Run only the isolation setup fragment, with all guest commands replaced."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="guest-provisioning-test-")
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name).resolve()
+        self.bin = self.base / "bin"
+        self.work = self.base / "work"
+        for directory in (self.bin, self.work, self.base / "diagnostics"):
+            directory.mkdir()
+        self.log = self.base / "calls.jsonl"
+        self.receipt = self.base / "ready"
+        fake = self.bin / "guest-command"
+        fake.write_text(f"#!{sys.executable} -I\n"
+                        + "import json, os, pathlib, sys, tempfile\n"
+                        + f"base = pathlib.Path({str(self.base)!r})\n" + r'''
+name, args = pathlib.Path(sys.argv[0]).name, sys.argv[1:]
+scenario = json.loads((base / "scenario.json").read_text())
+with (base / "calls.jsonl").open("a") as stream:
+    stream.write(json.dumps({"name": name, "args": args}) + "\n")
+if name == "id":
+    assert args == ["-u"], args
+    print(scenario.get("uid", 1000))
+elif name == "sudo":
+    if args == ["apt-get", "-o", "APT::Update::Error-Mode=any", "update"]:
+        stage = "update"
+    elif args == ["env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "install",
+                  "--yes", "--no-install-recommends", "bubblewrap"]:
+        stage = "install"
+    elif args[:3] == ["install", "-m", "0644"]:
+        assert args[-1] == "/etc/sysctl.d/99-sonic-static-review-userns.conf", args
+        stage = "persist"
+    elif args == ["sysctl", "-p", "/etc/sysctl.d/99-sonic-static-review-userns.conf"]:
+        stage = "apply"
+    else:
+        raise AssertionError(args)  # Never fall through to real host commands.
+    if scenario.get("fail") == stage:
+        sys.exit("synthetic " + stage + " failure")
+    if stage == "persist":
+        (base / "sysctl.conf").write_text(pathlib.Path(args[-2]).read_text())
+    if stage == "apply":
+        assert "kernel.apparmor_restrict_unprivileged_userns=0" in (base / "sysctl.conf").read_text()
+        (base / "sysctl-value").write_text("0")
+elif name == "sysctl":
+    assert args == ["-n", "kernel.apparmor_restrict_unprivileged_userns"], args
+    if scenario.get("fail") == "readback":
+        sys.exit("synthetic sysctl read failure")
+    print(scenario.get("readback", (base / "sysctl-value").read_text()))
+elif name == "python3":
+    assert args[:3] == ["-I", "-B", "-"], args
+    code = sys.stdin.read()
+    sys.argv = args[2:]
+    sys.platform = "linux"
+    sys.dont_write_bytecode = True
+    real_temporary_directory = tempfile.TemporaryDirectory
+    def guest_temporary_directory(*positional, **kwargs):
+        if kwargs.get("dir") == "/var/tmp":
+            kwargs["dir"] = str(base / "diagnostics")
+        return real_temporary_directory(*positional, **kwargs)
+    tempfile.TemporaryDirectory = guest_temporary_directory
+    if scenario.get("missing_bwrap"):
+        import shutil
+        real_which = shutil.which
+        shutil.which = lambda command: None if command == "bwrap" else real_which(command)
+    exec(compile(code, "guest-worker-probe", "exec"), {"__name__": "__main__"})
+elif name == "bwrap":
+    sentinel = pathlib.Path(args[-1])
+    assert sentinel.read_text() == "private diagnostic isolation probe"
+    assert sentinel.parent.parent.stat().st_mode & 0o777 == 0o700
+    status = scenario.get("probe_exit", 0)
+    if status:
+        print("synthetic namespace/canary failure", file=sys.stderr)
+    sys.exit(status)
+else:
+    raise AssertionError(name)
+''')
+        fake.chmod(0o755)
+        for name in ("id", "sudo", "sysctl", "python3", "bwrap"):
+            (self.bin / name).symlink_to(fake)
+
+    def script(self, name="sonic-static-review-v2"):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(bootstrap.main(["--dry-run", "--name", name]), 0)
+        return output.getvalue().split("--- BEGIN GUEST SCRIPT ---\n", 1)[1].split(
+            "--- END GUEST SCRIPT ---", 1)[0]
+
+    def provision(self, name="sonic-static-review-v2", **scenario):
+        guest = self.script(name)
+        marker = "# Worker isolation for the new VM only.\n"
+        self.assertIn(marker, guest, "guest setup must provision and verify worker isolation")
+        fragment = guest.split(marker, 1)[1].split("# Ubuntu cloud images", 1)[0]
+        self.assertLess(guest.index(marker), guest.index('values = {"status": "ready"'))
+        (self.base / "scenario.json").write_text(json.dumps(scenario))
+        # This is an extracted fragment with fake privileged commands, never the
+        # full guest script. All actual writes remain in the disposable fixture.
+        harness = ("set -euo pipefail\numask 077\n"
+                   + f"vm_name={shlex.quote(name)}\nguest_work={shlex.quote(str(self.work))}\n"
+                   + fragment + f"\nprintf 'ready\\n' > {shlex.quote(str(self.receipt))}\n")
+        return subprocess.run(["/bin/bash", "--noprofile", "--norc", "-s"], input=harness,
+                              cwd=self.base, env={"PATH": str(self.bin) + os.pathsep + os.defpath},
+                              text=True, capture_output=True, timeout=15, check=False)
+
+    def calls(self):
+        return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
+
+    def test_plan_carries_exact_local_probe_modules_without_source_mount_imports(self):
+        guest = self.script()
+        self.assertIn("<<'WORKER_PROBE'\n", guest)
+        code = guest.split("<<'WORKER_PROBE'\n", 1)[1].split("\nWORKER_PROBE\n", 1)[0]
+        assignment = next(node for node in ast.parse(code).body if isinstance(node, ast.Assign)
+                          and any(isinstance(target, ast.Name) and target.id == "probe_sources"
+                                  for target in node.targets))
+        self.assertEqual(ast.literal_eval(assignment.value), {
+            name: (ROOT / "experiment/src" / name).read_text()
+            for name in ("common.py", "diagnostics.py")})
+
+    def test_fresh_guest_installs_persists_and_runs_exact_probe_before_ready(self):
+        result = self.provision()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.receipt.read_text(), "ready\n")
+        self.assertEqual((self.base / "sysctl.conf").read_text(),
+                         "kernel.apparmor_restrict_unprivileged_userns=0\n")
+        calls = self.calls()
+        self.assertEqual([call["name"] for call in calls],
+                         ["id", "sudo", "sudo", "sudo", "sudo", "sysctl", "python3", "bwrap"])
+        from diagnostics import isolation_prefix
+        probe_args = calls[-1]["args"]
+        root = Path(probe_args[-1]).parent.parent
+        with mock.patch("diagnostics.sys.platform", "linux"), \
+                mock.patch("diagnostics.shutil.which", return_value=str(self.bin / "bwrap")):
+            prefix = isolation_prefix(root)
+        self.assertEqual(probe_args[:len(prefix) - 1], prefix[1:])
+        self.assertEqual(probe_args[len(prefix) - 1:len(prefix) + 2], [sys.executable, "-I", "-c"])
+        self.assertFalse(root.exists())
+        self.assertEqual(list((self.base / "diagnostics").iterdir()), [])
+
+    def test_provisioning_and_probe_failures_never_declare_ready(self):
+        scenarios = [{"fail": stage} for stage in ("update", "install", "persist", "apply", "readback")]
+        scenarios += [{"readback": "1"}, {"missing_bwrap": True}, {"probe_exit": 1}, {"probe_exit": 9}]
+        for scenario in scenarios:
+            with self.subTest(scenario=scenario):
+                shutil.rmtree(self.work)
+                self.work.mkdir()
+                self.log.unlink(missing_ok=True)
+                result = self.provision(**scenario)
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertFalse(self.receipt.exists())
+                if "fail" in scenario or "readback" in scenario:
+                    self.assertFalse(any(call["name"] in ("python3", "bwrap") for call in self.calls()))
+                else:
+                    self.assertIn("guest worker isolation preflight failed", result.stderr)
+                self.assertEqual(list((self.base / "diagnostics").iterdir()), [])
+
+    def test_root_cannot_pass_the_unprivileged_probe(self):
+        result = self.provision(uid=0)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unprivileged guest user", result.stderr)
+        self.assertEqual([call["name"] for call in self.calls()], ["id"])
+        self.assertFalse(self.receipt.exists())
+
+    def test_legacy_guest_skips_new_provisioning_and_probe(self):
+        result = self.provision(name=bootstrap.VM_NAME)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(self.receipt.read_text(), "ready\n")
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 """Validated production units and explicit six-unit pilot queue files."""
 
 import argparse
+import json
 from pathlib import Path
 import sys
 
@@ -75,16 +76,48 @@ def make_pilot_queue(prepared, mode, out, paths=None):
     return value
 
 
+def make_recovery_queue(prepared, mode, out, notifications, task_ids):
+    """Map six historical failed tasks to current units, never open old traces."""
+    require(len(task_ids) == 6 and len(set(task_ids)) == 6,
+            'recovery pilot requires six distinct failed task IDs')
+    require(not notifications.is_symlink() and notifications.is_file(),
+            'notifications must be a regular JSONL file')
+    failed = set()
+    for line in notifications.read_text().splitlines():
+        notice = json.loads(line)
+        require(isinstance(notice, dict) and isinstance(notice.get('task_id'), str),
+                'invalid historical notification')
+        if notice.get('lane') == 'discovery':
+            failed.add(notice['task_id'])
+    require(set(task_ids) <= failed, 'selected task ID is not a historical discovery failure')
+    available = {task['task_id']: task for task in build_tasks(prepared, mode)}
+    require(all(task_id in available for task_id in task_ids),
+            'failed task is unavailable in this prepared manifest/mode/model')
+    selected = [available[task_id] for task_id in task_ids]
+    require(len({task['unit_id'] for task in selected}) == 6,
+            'recovery pilot requires six distinct review units')
+    # Production expansion queues both configured models, even when only one
+    # model failed historically. The queue schema and runner stay unchanged.
+    return make_pilot_queue(prepared, mode, out, [task['path'] for task in selected])
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prepared", type=Path, required=True)
     parser.add_argument("--mode", choices=("exhaustive", "targeted"), required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--path", action="append", dest="paths")
+    parser.add_argument('--notifications', type=Path, help='historical full-run notifications.jsonl')
+    parser.add_argument('--task-id', action='append', dest='task_ids')
     args = parser.parse_args()
     try:
-        make_pilot_queue(args.prepared, args.mode, args.out, args.paths)
-    except (ReviewError, OSError, UnicodeError) as exc:
+        if args.notifications or args.task_ids:
+            require(args.notifications and args.task_ids and not args.paths,
+                    '--notifications and six --task-id values are required together, without --path')
+            make_recovery_queue(args.prepared, args.mode, args.out, args.notifications, args.task_ids)
+        else:
+            make_pilot_queue(args.prepared, args.mode, args.out, args.paths)
+    except (ReviewError, OSError, UnicodeError, ValueError) as exc:
         print(f"FAIL pilot queue: {exc}", file=sys.stderr)
         return 1
     print(f"Pilot queue: six {args.mode} units, twelve discovery sessions: {args.out}")

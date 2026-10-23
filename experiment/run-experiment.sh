@@ -5,7 +5,7 @@ usage() {
     cat <<'EOF'
 Usage:
   run-experiment.sh prepare {exhaustive|targeted} [--repo DIR] [--out DIR] [--config FILE] [--identity FILE]
-  run-experiment.sh run {exhaustive|targeted} --reference DIR [--prepared DIR] [--out DIR] [--queue FILE]
+  run-experiment.sh run {exhaustive|targeted} --reference DIR [--prepared DIR] [--out DIR] [--queue FILE] [--diagnostics-root DIR]
 Prepare performs local static selection only. Run invokes standalone model CLIs.
 Defaults: sibling sonic-swss source, results/MODE prepared inputs, results/MODE-run output.
 EOF
@@ -33,14 +33,15 @@ config="$script_dir/config.json"
 reference=''
 identity=''
 queue=''
+diagnostics=''
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --repo|--out|--config|--identity|--prepared|--reference|--queue)
+        --repo|--out|--config|--identity|--prepared|--reference|--queue|--diagnostics-root)
             [[ $# -ge 2 && -n $2 && $2 != --* ]] || fail "$1 requires a value"
             case "$1" in
                 --repo|--config|--identity) [[ $action == prepare ]] || fail "$1 is only valid for prepare" ;;
-                --prepared|--reference|--queue) [[ $action == run ]] || fail "$1 is only valid for run" ;;
+                --prepared|--reference|--queue|--diagnostics-root) [[ $action == run ]] || fail "$1 is only valid for run" ;;
             esac
             case "$1" in
                 --repo) repo=$2 ;;
@@ -50,6 +51,7 @@ while [[ $# -gt 0 ]]; do
                 --prepared) prepared=$2 ;;
                 --reference) reference=$2 ;;
                 --queue) queue=$2 ;;
+                --diagnostics-root) diagnostics=$2 ;;
             esac
             shift 2
             ;;
@@ -63,6 +65,7 @@ if [[ $action == run ]]; then
     [[ -n $reference ]] || fail 'run requires --reference DIR'
     args=(--prepared "$prepared" --mode "$mode" --out "$out" --reference "$reference")
     [[ -z $queue ]] || args+=(--queue "$queue")
+    [[ -z $diagnostics ]] || args+=(--diagnostics-root "$diagnostics")
     exec python3 -B "$script_dir/src/runner.py" "${args[@]}"
 fi
 args=(--repo "$repo" --config "$config" --out "$out" --mode "$mode")
