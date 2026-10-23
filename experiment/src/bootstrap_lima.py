@@ -142,9 +142,7 @@ def authentication_commands():
 def print_plan(paths, versions, guest_script, profile, allow_other_host):
     print("DRY RUN: no commands executed, downloads, files, or VM state changed.")
     print(f"Host profile: {profile['host']} (uname -s/-m).")
-    print("Host: --create requires short hostname 'u' (uname -n); "
-          "--allow-other-host explicitly overrides this rule.")
-    print(f"Host: other-host override {'enabled' if allow_other_host else 'disabled'}.")
+
     print("Host: validate absolute existing, disjoint mount directories; results must be empty.")
     print("Host: pass only PATH, HOME, USER, LOGNAME, TMPDIR, LIMA_HOME, and LC_ALL=C to Lima.")
     print(f"Host: require `limactl --version` == 'limactl version {profile['lima']}'.")
@@ -198,8 +196,6 @@ def verify_receipt(results, versions, profile):
 
 
 def create_vm(paths, versions, guest_script, profile, allow_other_host=False):
-    require(allow_other_host or os.uname().nodename.split(".", 1)[0] == "u",
-            "VM creation is restricted to host 'u'; run there or explicitly use --allow-other-host")
     # Do not pass provider tokens, SSH_AUTH_SOCK, shell startup overrides, or
     # host proxy credentials to Lima. Do not inspect any credential files.
     env = {key: os.environ[key] for key in ("PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LIMA_HOME")

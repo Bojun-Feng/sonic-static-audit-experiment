@@ -185,24 +185,16 @@ else:
         self.assertIn(node_hash, plan.stdout)
         self.assertIn(f"Host profile: {self.HOST[0]}/{self.HOST[4]} (uname -s/-m).", plan.stdout)
         self.assertIn("https://cloud-images.ubuntu.com/releases/noble/release-20261017/", yaml)
-        self.assertIn("short hostname 'u'", plan.stdout)
-        self.assertIn("other-host override disabled", plan.stdout)
-
-    def test_other_hosts_require_explicit_creation_override(self):
+        self.assertIn(f"Host profile: {self.HOST[0]}/{self.HOST[4]}", plan.stdout)
+    def test_linux_profile_does_not_depend_on_local_hostname(self):
         host = list(self.HOST)
         host[1] = "another-host"
         self.scenario_is(host=host)
         self.assertEqual(self.invoke("--dry-run", *self.path_args()).returncode, 0)
         result = self.invoke("--create", *self.path_args())
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("restricted to host 'u'", result.stderr)
-        self.assertIn("--allow-other-host", result.stderr)
-        self.assertEqual(self.calls(), [])
-        self.assert_clean_scratch()
-        result = self.invoke("--create", "--allow-other-host", *self.path_args())
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_u_fully_qualified_hostname_is_allowed(self):
+    def test_fully_qualified_linux_hostname_is_allowed(self):
         host = list(self.HOST)
         host[1] = "u.example.test"
         self.scenario_is(host=host)

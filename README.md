@@ -145,10 +145,7 @@ and QEMU already installed:
   --results /absolute/path/to/audit-results
 ```
 
-The short hostname from `uname -n` must be `u` (`u.example.test` also qualifies).
-Creation elsewhere fails before invoking Lima or creating scratch files. Only an
-explicit `--allow-other-host` on that invocation overrides this restriction;
-it does not override the detected architecture, version pins, or other checks.
+Run the bootstrap locally on the intended Linux host. The command validates the detected architecture and version pins before creating the VM.
 Apple Silicon creation requires this flag. Dry-run works on the supported Mac
 without an override and prints its ARM64 profile, the host policy, and override
 status. There is no option to select a foreign host profile.
