@@ -310,7 +310,9 @@ else:
 
     def test_guest_has_only_pinned_installs_and_version_probes(self):
         guest = (ROOT / "experiment/guest-setup.sh").read_text()
-        self.assertIn('"@openai/codex@$codex_version" "@anthropic-ai/claude-code@$claude_version"', guest)
+        self.assertIn('"@openai/codex@$codex_version"', guest)
+        self.assertIn('"@anthropic-ai/claude-code@$claude_version"', guest)
+        self.assertIn("Claude Code requires its official postinstall", guest)
         self.assertIn("--ignore-scripts --no-audit --no-fund", guest)
         self.assertIn("Node archive SHA-256 mismatch", guest)
         self.assertIn('codex_observed=$(codex --version)', guest)

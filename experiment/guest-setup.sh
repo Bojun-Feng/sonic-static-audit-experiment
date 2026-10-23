@@ -42,11 +42,16 @@ sudo ln -s /opt/audit-node/bin/node /usr/local/bin/node
 export PATH=/opt/audit-node/bin:/usr/local/bin:/usr/bin:/bin
 [[ $(node --version) == "v$node_version" ]]
 sudo install -d -m 0755 -o "$(id -u)" -g "$(id -g)" /opt/audit-clis
-# Lifecycle scripts are disabled: dependencies must ship binaries, not compile.
+# Codex installs without lifecycle scripts. Claude Code requires its official postinstall
+# to fetch the pinned platform binary, so install it separately with scripts enabled.
 npm install --global --prefix /opt/audit-clis --cache "$guest_work/npm-cache" \
     --userconfig /dev/null --registry https://registry.npmjs.org \
     --ignore-scripts --no-audit --no-fund --update-notifier=false \
-    "@openai/codex@$codex_version" "@anthropic-ai/claude-code@$claude_version"
+    "@openai/codex@$codex_version"
+npm install --global --prefix /opt/audit-clis --cache "$guest_work/npm-cache" \
+    --userconfig /dev/null --registry https://registry.npmjs.org \
+    --no-audit --no-fund --update-notifier=false \
+    "@anthropic-ai/claude-code@$claude_version"
 
 # Persist update/telemetry restrictions for subsequent manual guest sessions.
 cat > "$guest_work/codex" <<'SH'
