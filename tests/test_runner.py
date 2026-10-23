@@ -15,7 +15,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "experiment/src"))
-from common import AuditError, json_bytes, read_json
+from common import ReviewError, json_bytes, read_json
 from source_identity import bind
 
 
@@ -63,14 +63,14 @@ class RunnerTests(unittest.TestCase):
         self.state.mkdir()
         self.scenario({})
         self.env = mock.patch.dict(os.environ, {"PATH": str(self.bin) + os.pathsep + os.environ.get("PATH", ""),
-                                               "UNRELATED_SECRET": "must-not-be-recorded"})
+                                               "UNRELATED_VARIABLE": "must-not-be-recorded"})
         self.env.start()
         self.addCleanup(self.env.stop)
 
     def scenario(self, value):
         (self.state / "scenario.json").write_bytes(json_bytes(value))
 
-    def run_audit(self, mode="exhaustive"):
+    def run_review(self, mode="exhaustive"):
         from runner import run
         return run(self.base / mode, mode, self.base / (mode + "-run"), self.reference,
                    lock_root=self.base / "locks")
@@ -79,7 +79,7 @@ class RunnerTests(unittest.TestCase):
         return [json.loads(line) for line in (self.state / "events.jsonl").read_text().splitlines()]
 
     def test_simultaneous_pilot_arms_share_sixteen_slots_and_no_clean_reports(self):
-        from audit_queue import make_pilot_queue
+        from review_queue import make_pilot_queue
         self.scenario({"start_gate": 16, "shared_gate": True, "process_relative_clock": True})
         source_before = {p.name: p.read_bytes() for p in (self.repo / "src").iterdir()}
         processes = []
@@ -163,14 +163,14 @@ class RunnerTests(unittest.TestCase):
 
     def test_retry_replaces_partial_trace_and_rerun_skips_final_success(self):
         self.scenario({"codex": {"src/route0.cpp": {"first": "partial"}}})
-        self.assertEqual(self.run_audit(), 0)
+        self.assertEqual(self.run_review(), 0)
         out = self.base / "exhaustive-run"
         all_data = b"".join(p.read_bytes() for p in (out / "results").rglob("*") if p.is_file())
-        self.assertNotIn(b"INCOMPLETE-POISON", all_data)
+        self.assertNotIn(b"INCOMPLETE-MARKER", all_data)
         counts = read_json(self.state / "counts.json")
         self.assertEqual(sorted(counts.values()), [1] * 10 + [2, 2])
         before = self.events()
-        self.assertEqual(self.run_audit(), 0)
+        self.assertEqual(self.run_review(), 0)
         self.assertEqual(before, self.events())
         self.assertEqual(list((out / "work").iterdir()), [])
 
@@ -178,7 +178,7 @@ class RunnerTests(unittest.TestCase):
         for mode in ("exhaustive", "targeted"):
             self.scenario({"codex": {"src/route0.cpp": {
                 "always": "passive", "candidates": [finding("src/route0.cpp")]}}})
-            self.assertEqual(self.run_audit(mode), 1)
+            self.assertEqual(self.run_review(mode), 1)
             out = self.base / (mode + "-run")
             self.assertEqual(read_json(out / "status.json")["discovery"]["failed"], 2)
             self.assertFalse(list((out / "results/candidates").iterdir()))
@@ -191,7 +191,7 @@ class RunnerTests(unittest.TestCase):
     def test_passive_clean_trace_retries_then_accepts_inspected_attempt(self):
         self.scenario({"codex": {"src/route0.cpp": {"first": "passive"},
                                   "src/route1.cpp": {"always": "passive"}}})
-        self.assertEqual(self.run_audit(), 1)
+        self.assertEqual(self.run_review(), 1)
         out = self.base / "exhaustive-run"
         self.assertEqual(read_json(out / "status.json")["discovery"]["failed"], 2)
         for completion in (out / "results/discovery").glob("*/completion.json"):
@@ -200,12 +200,12 @@ class RunnerTests(unittest.TestCase):
                 self.assertEqual(read_json(completion.parent / "metadata.json")["attempt"], 2)
         self.assertEqual(list((out / "work").iterdir()), [])
         before = self.events()
-        self.assertEqual(self.run_audit(), 1)
+        self.assertEqual(self.run_review(), 1)
         self.assertEqual(before, self.events())
 
     def test_resume_revalidates_native_inspection_even_with_matching_hashes(self):
         from common import sha256
-        self.assertEqual(self.run_audit(), 0)
+        self.assertEqual(self.run_review(), 0)
         trace = next((self.base / "exhaustive-run/results/discovery").glob("*/trace.jsonl"))
         records = [json.loads(line) for line in trace.read_text().splitlines()]
         trace.write_text("".join(json.dumps(e) + "\n" for e in records
@@ -214,12 +214,12 @@ class RunnerTests(unittest.TestCase):
         value = read_json(completion)
         value["artifacts"]["trace.jsonl"] = sha256(trace.read_bytes())
         completion.write_bytes(json_bytes(value))
-        with self.assertRaises(AuditError):
-            self.run_audit()
+        with self.assertRaises(ReviewError):
+            self.run_review()
 
     def test_terminal_failure_notifies_and_healthy_tasks_finish(self):
         self.scenario({"codex": {"gpt-6-astra:src/route0.cpp": {"always": "exit"}}})
-        self.assertEqual(self.run_audit(), 1)
+        self.assertEqual(self.run_review(), 1)
         out = self.base / "exhaustive-run"
         status = read_json(out / "status.json")
         self.assertEqual(status["state"], "failed")
@@ -235,7 +235,7 @@ class RunnerTests(unittest.TestCase):
         self.scenario({"codex": {"src/route0.cpp": {"candidates": [a]},
                                   "gpt-5.6-sol:src/route1.cpp": {"candidates": [b]}},
                        "claude": {"src/route1.cpp": {"status": "needs-validation"}}})
-        self.assertEqual(self.run_audit(), 0)
+        self.assertEqual(self.run_review(), 0)
         out = self.base / "exhaustive-run"
         candidates = [read_json(p) for p in (out / "results/candidates").glob("*/candidate.json")]
         self.assertEqual(len(candidates), 2)
@@ -247,7 +247,7 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual([e["event"] for e in events], ["start", "end", "start", "end"])
 
     def test_shell_run_supports_both_modes_and_explicit_queue(self):
-        from audit_queue import make_pilot_queue
+        from review_queue import make_pilot_queue
         for mode in ('exhaustive', 'targeted'):
             queue = self.base / (mode + '-queue.json')
             make_pilot_queue(self.base / mode, mode, queue)
@@ -266,12 +266,12 @@ class RunnerTests(unittest.TestCase):
     def test_invalid_findings_never_enter_results_and_terminal_failures_resume(self):
         bad = finding('../outside.cpp')
         self.scenario({'codex': {'src/route0.cpp': {'candidates': [bad]}}})
-        self.assertEqual(self.run_audit(), 1)
+        self.assertEqual(self.run_review(), 1)
         out = self.base / 'exhaustive-run'
         self.assertEqual(read_json(out / 'status.json')['discovery']['failed'], 2)
         self.assertFalse(list((out / 'results/candidates').iterdir()))
         before = self.events()
-        self.assertEqual(self.run_audit(), 1)
+        self.assertEqual(self.run_review(), 1)
         self.assertEqual(self.events(), before)
         self.assertEqual(len((out / 'notifications.jsonl').read_text().splitlines()), 2)
 
@@ -281,7 +281,7 @@ class RunnerTests(unittest.TestCase):
                        'claude': {paths[0]: {'first': 'partial'},
                                   paths[1]: {'status': 'duplicate', 'duplicate_of': 'previous'},
                                   paths[2]: {'always': 'exit'}}})
-        self.assertEqual(self.run_audit(), 1)
+        self.assertEqual(self.run_review(), 1)
         out = self.base / 'exhaustive-run'
         status = read_json(out / 'status.json')
         self.assertEqual(status['discovery']['succeeded'], 12)
@@ -290,27 +290,27 @@ class RunnerTests(unittest.TestCase):
         verdicts = [read_json(p) for p in (out / 'results/verifier').glob('*/result.json')]
         self.assertEqual({v['status'] for v in verdicts}, {'confirmed', 'duplicate'})
         before = self.events()
-        self.assertEqual(self.run_audit(), 1)
+        self.assertEqual(self.run_review(), 1)
         self.assertEqual(self.events(), before)
 
     def test_resume_rejects_changed_completed_artifacts(self):
-        self.assertEqual(self.run_audit(), 0)
+        self.assertEqual(self.run_review(), 0)
         out = self.base / 'exhaustive-run'
         result = next((out / 'results/discovery').glob('*/result.json'))
         result.write_text('{"candidates": []}')
         before = self.events()
-        with self.assertRaises(AuditError):
-            self.run_audit()
+        with self.assertRaises(ReviewError):
+            self.run_review()
         self.assertEqual(self.events(), before)
 
     def test_timeout_kills_cli_cleans_work_and_releases_slots(self):
-        from audit_queue import runner_config
+        from review_queue import runner_config
         from runner import run
         self.scenario({'sleep': 2})
         config = runner_config()
         config['timeout_seconds'] = 0.15
         with mock.patch('runner.runner_config', return_value=config):
-            self.assertEqual(self.run_audit(), 1)
+            self.assertEqual(self.run_review(), 1)
         out = self.base / 'exhaustive-run'
         self.assertEqual(read_json(out / 'status.json')['discovery']['failed'], 12)
         self.assertEqual(list((out / 'work').iterdir()), [])
@@ -322,25 +322,25 @@ class RunnerTests(unittest.TestCase):
     def test_changed_run_binding_and_overlapping_outputs_fail_before_cli(self):
         from runner import run
         for out in (self.repo / 'output', self.reference / 'output', self.base / 'exhaustive/output'):
-            with self.assertRaises(AuditError):
+            with self.assertRaises(ReviewError):
                 run(self.base / 'exhaustive', 'exhaustive', out, self.reference)
             self.assertFalse(out.exists())
-        self.assertEqual(self.run_audit(), 0)
+        self.assertEqual(self.run_review(), 0)
         other = self.base / 'other-reference'
         other.mkdir()
         before = self.events()
-        with self.assertRaises(AuditError):
+        with self.assertRaises(ReviewError):
             run(self.base / 'exhaustive', 'exhaustive', self.base / 'exhaustive-run', other)
         self.assertEqual(self.events(), before)
 
     def test_incomplete_completion_record_is_not_resumed(self):
-        self.assertEqual(self.run_audit(), 0)
+        self.assertEqual(self.run_review(), 0)
         path = next((self.base / 'exhaustive-run/results/discovery').glob('*/completion.json'))
         value = read_json(path)
         value['artifacts'] = {}
         path.write_bytes(json_bytes(value))
-        with self.assertRaises(AuditError):
-            self.run_audit()
+        with self.assertRaises(ReviewError):
+            self.run_review()
 
 
 if __name__ == "__main__":

@@ -20,14 +20,14 @@ import re
 import shutil
 import tempfile
 
-from common import (AuditError, collect_sources, exact_children, group_for, json_bytes,
+from common import (ReviewError, collect_sources, exact_children, group_for, json_bytes,
                     match_location, read_json, regex_matches, require, sha256, sorted_matches,
                     source_and_output, source_commit, validate_config, write_new)
 
 
 def tool_environment():
     # Keep interpreter lookup working for packaged CLI launchers, but do not
-    # pass provider tokens or other inherited credentials to subprocesses.
+    # pass provider tokens or other inherited environment variables to subprocesses.
     return {"PATH": os.environ.get("PATH", os.defpath), "LC_ALL": "C"}
 
 
@@ -72,7 +72,7 @@ def ast_matches(data, patterns, binary, config_path):
                             "ast-grep match text disagrees with source bytes")
                     matches.append(location)
             except (ValueError, KeyError, TypeError, UnicodeError) as exc:
-                raise AuditError(f"invalid ast-grep JSON for {pattern['id']}") from exc
+                raise ReviewError(f"invalid ast-grep JSON for {pattern['id']}") from exc
     return sorted_matches(matches)
 
 
@@ -142,7 +142,7 @@ def main():
     args = parser.parse_args()
     try:
         select(args.repo, args.config, args.out, args.mode, args.identity)
-    except (AuditError, OSError, UnicodeError, subprocess.SubprocessError) as exc:
+    except (ReviewError, OSError, UnicodeError, subprocess.SubprocessError) as exc:
         print(f"FAIL selection: {exc}", file=sys.stderr)
         return 1
     return 0

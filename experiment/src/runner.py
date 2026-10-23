@@ -23,8 +23,8 @@ import tempfile
 import threading
 import time
 
-from audit_queue import EXPERIMENT, build_tasks, runner_config
-from common import (AuditError, exact_children, json_bytes, keys, read_json, require, sha256,
+from review_queue import EXPERIMENT, build_tasks, runner_config
+from common import (ReviewError, exact_children, json_bytes, keys, read_json, require, sha256,
                     source_and_output, source_lines, within)
 from model_cli import (discovery_command, discovery_prompt, parse_codex, parse_claude,
                        verifier_command, verifier_prompt)
@@ -34,7 +34,7 @@ from validate import load_selection
 
 def atomic_json(path, value):
     temporary = path.with_name(path.name + '.tmp')
-    require(not path.is_symlink() and not temporary.is_symlink(), 'unsafe output file')
+    require(not path.is_symlink() and not temporary.is_symlink(), 'output file must not be a symlink')
     temporary.write_bytes(json_bytes(value))
     temporary.replace(path)
 
@@ -77,7 +77,7 @@ def invoke(command, prompt, work, slot, timeout, output_fd):
     try:
         events = [json.loads(line) for line in (work / 'trace.jsonl').read_text().splitlines()]
     except (ValueError, UnicodeError) as exc:
-        raise AuditError('invalid CLI event stream') from exc
+        raise ReviewError('invalid CLI event stream') from exc
     require(events and all(isinstance(e, dict) for e in events), 'empty or invalid CLI events')
     return events
 
@@ -103,7 +103,7 @@ def run(prepared, mode, out, reference, queue=None, lock_root=None):
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
-            raise AuditError('another runner owns this output') from exc
+            raise ReviewError('another runner owns this output') from exc
         return run_locked(tasks, binding, repo, out, reference, config, lock_root or global_root(), fd)
     finally:
         os.close(fd)
@@ -120,7 +120,7 @@ def run_locked(tasks, binding, repo, out, reference, config, lock_root, output_f
         within(out, name).mkdir(exist_ok=True)
     # The output lock excludes another runner. Child processes inherit it too.
     for child in (out / 'work').iterdir():
-        require(not child.is_symlink() and child.is_dir(), 'unsafe work directory')
+        require(not child.is_symlink() and child.is_dir(), 'unexpected entry in work directory')
         shutil.rmtree(child)
     mutex = threading.Lock()
     states = {'discovery': {t['task_id']: 'queued' for t in tasks}, 'verifier': {}}
@@ -142,7 +142,7 @@ def run_locked(tasks, binding, repo, out, reference, config, lock_root, output_f
         task_id = task['task_id']
         destination = out / 'results' / lane / task_id
         if destination.exists():
-            require(not destination.is_symlink(), 'unsafe completed result')
+            require(not destination.is_symlink(), 'completed result must not be a symlink')
             completion = read_json(destination / 'completion.json')
             keys(completion, ['task', 'artifacts'], 'completion')
             keys(completion['artifacts'], ['trace.jsonl', 'stderr.log', 'prompt.txt',
@@ -202,7 +202,7 @@ def run_locked(tasks, binding, repo, out, reference, config, lock_root, output_f
                     states[lane][task_id] = 'succeeded'
                     status()
                 return answer
-            except (AuditError, OSError, UnicodeError, ValueError, subprocess.TimeoutExpired) as exc:
+            except (ReviewError, OSError, UnicodeError, ValueError, subprocess.TimeoutExpired) as exc:
                 # Do not persist arbitrary CLI output or environment in failure metadata.
                 error = type(exc).__name__
             finally:
@@ -259,7 +259,7 @@ def main():
     args = parser.parse_args()
     try:
         return run(args.prepared, args.mode, args.out, args.reference, args.queue)
-    except (AuditError, OSError, ValueError) as exc:
+    except (ReviewError, OSError, ValueError) as exc:
         print(f'FAIL runner: {exc}', file=sys.stderr)
         return 1
 

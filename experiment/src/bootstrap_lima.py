@@ -11,15 +11,15 @@ import subprocess
 import sys
 import tempfile
 
-from common import AuditError, read_json, require, validate_config
+from common import ReviewError, read_json, require, validate_config
 
 EXPERIMENT = Path(__file__).resolve().parents[1]
 ROOT = EXPERIMENT.parent
-VM_NAME = "sonic-static-audit"
+VM_NAME = "sonic-static-audit"  # Legacy runtime name of the existing VM; keep unchanged.
 IMAGE_BASE = "https://cloud-images.ubuntu.com/releases/noble/release-20261017"
 NODE_VERSION = "22.14.0"
 PLACEHOLDERS = ("/absolute/path/to/sonic-swss", "/absolute/path/to/reference-materials",
-                "/absolute/path/to/audit-results")
+                "/absolute/path/to/review-results")
 
 
 def host_profile():
@@ -41,7 +41,7 @@ def host_profile():
             "image_sha256": "50e24e1fb79e89116e939d90aa7738f7af48c442fa1bc2510131e0b39c50348e",
             "node_sha256": "8cf30ff7250f9463b53c18f89c6c606dfda70378215b2c905d0a9a8b08bd45e0",
         }
-    raise AuditError(f"unsupported host {host.sysname}/{host.machine}; "
+    raise ReviewError(f"unsupported host {host.sysname}/{host.machine}; "
                      "require Linux/x86_64 or Darwin/arm64")
 
 
@@ -65,7 +65,7 @@ def mount_paths(values):
                 and not ROOT.parent.is_relative_to(path),
                 f"--{label}: refusing host home, repository parent, or their ancestors")
         require(not any(p.startswith(".") for p in path.parts),
-                f"--{label}: hidden/credential directories cannot be mounted")
+                f"--{label}: hidden directories cannot be mounted")
         require(os.access(path, os.R_OK | os.X_OK), f"--{label} is not readable/searchable")
         paths.append(path)
     for i, left in enumerate(paths):
@@ -152,11 +152,11 @@ def print_plan(paths, versions, guest_script, profile, allow_other_host):
     print("Host: require Lima state and temporary scratch outside all mounts.")
     print(f"Host: limactl list --quiet; refuse existing {VM_NAME} (including stopped VMs).")
     print("Host: create a private mode-0700 temporary directory under the system temp directory/TMPDIR.")
-    print("Host: write mode-0600 <scratch>/audit.yaml with exactly this content:")
+    print("Host: write mode-0600 <scratch>/review-vm.yaml with exactly this content:")
     print("--- BEGIN LIMA YAML ---")
     print(render_config(paths, profile), end="")
     print("--- END LIMA YAML ---")
-    for command in commands("<scratch>/audit.yaml", versions, profile):
+    for command in commands("<scratch>/review-vm.yaml", versions, profile):
         print("Host: " + shlex.join(command))
     print("Guest: the shell command receives exactly this script on stdin:")
     print("--- BEGIN GUEST SCRIPT ---")
@@ -196,8 +196,8 @@ def verify_receipt(results, versions, profile):
 
 
 def create_vm(paths, versions, guest_script, profile, allow_other_host=False):
-    # Do not pass provider tokens, SSH_AUTH_SOCK, shell startup overrides, or
-    # host proxy credentials to Lima. Do not inspect any credential files.
+    # Pass Lima a fixed, minimal environment: provider tokens, SSH_AUTH_SOCK,
+    # shell startup overrides, and proxy settings are not forwarded.
     env = {key: os.environ[key] for key in ("PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LIMA_HOME")
            if key in os.environ}
     env["LC_ALL"] = "C"
@@ -247,9 +247,9 @@ def create_vm(paths, versions, guest_script, profile, allow_other_host=False):
             "temporary scratch must be outside all mounts; set TMPDIR accordingly")
     try:
         # The context also cleans up on failed creation, start, or guest setup.
-        with tempfile.TemporaryDirectory(prefix="sonic-static-audit-", dir=scratch_parent) as directory:
+        with tempfile.TemporaryDirectory(prefix="review-vm-", dir=scratch_parent) as directory:
             scratch = Path(directory)
-            config_path = scratch / "audit.yaml"
+            config_path = scratch / "review-vm.yaml"
             with config_path.open("x", encoding="utf-8") as stream:
                 os.chmod(config_path, 0o600)
                 stream.write(render_config(paths, profile))
@@ -306,7 +306,7 @@ def main(argv=None):
             print_plan(paths, versions, guest_script, profile, args.allow_other_host)
         else:
             create_vm(paths, versions, guest_script, profile, args.allow_other_host)
-    except (AuditError, OSError, ValueError, subprocess.CalledProcessError, KeyboardInterrupt) as exc:
+    except (ReviewError, OSError, ValueError, subprocess.CalledProcessError, KeyboardInterrupt) as exc:
         print(f"ERROR: {exc or 'bootstrap interrupted'}", file=sys.stderr)
         return 1
     return 0

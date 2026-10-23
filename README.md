@@ -1,13 +1,38 @@
-# Static source audit experiment
+# Static correctness review experiment
 
-A static audit preparation and model runner with a SONiC SWSS routing/interface profile. It
-compares an **exhaustive** queue of relevant production files with a **targeted**
-queue of prefix/partial-match and structured-key candidates. Preparation generates and validates artifacts. The explicit `run` command performs
-model discovery and independent candidate verification.
+A static correctness review experiment for SONiC SWSS source: a local preparation
+step and a model runner with a routing/interface profile. It compares two ways of
+using LLM coding sessions to review C++ for ordinary correctness defects (for
+example, `Ethernet4` wrongly matching `Ethernet40` through a prefix comparison):
+an **exhaustive** queue of relevant production files and a **targeted** queue of
+prefix/partial-match and structured-key candidates. Preparation generates and
+validates artifacts. The explicit `run` command performs model discovery and
+independent candidate verification.
 
 Requirements: Python 3.10+ (standard library only), Bash, and an existing source
 checkout. `ast-grep` is optional. Preparation performs no installation. The separate
-Lima bootstrap installs pinned audit CLIs only when explicitly run with `--create`.
+Lima bootstrap installs the pinned model CLIs only when explicitly run with `--create`.
+
+## Vocabulary
+
+This is a static correctness review experiment; the wording below is used
+throughout the repository:
+
+- **review** / **correctness review**: reading SONiC SWSS source for ordinary
+  correctness defects. A **review unit** is one assigned file (exhaustive mode)
+  or one source-card group (targeted mode).
+- **finding** / **candidate defect**: an issue reported by a discovery model.
+  Findings with the same location and normalized root cause are combined into
+  one candidate, and the verifier returns a **verdict**: confirmed, rejected,
+  duplicate, or needs-validation.
+- **scope** / **constraints**: what a session may read and run (static, read-only
+  inspection only). **Evidence** is the retained read-only commands and output
+  that a trace must contain.
+- **legacy runtime names**: the existing, already-authenticated VM keeps its
+  original names: VM `sonic-static-audit`, guest user `audit` with home
+  `/home/audit`, guest paths `/opt/audit-clis` and `/opt/audit-node`, and the
+  runner lock directory `/tmp/sonic-static-audit-<uid>`. This repository's name
+  and the npm flag `--no-audit` are likewise unchanged.
 
 ## Prepare
 
@@ -54,9 +79,9 @@ Source and reference inputs should be mounted read-only. Discovery uses
 `--sandbox danger-full-access` with `approval_policy="never"`: the Linux guest
 runtime failed to execute inspection commands in `read-only` mode, while a direct
 probe with this mode retained a completed native command event and source output.
-Filesystem protection comes from the VM's read-only source/reference mounts;
-Codex does not enforce a read-only sandbox in this mode. Verifier tools remain
-limited to Read/Grep/Glob. Prompts still prohibit source execution, tests, builds,
+In this mode Codex itself does not restrict file access; the source and reference
+inputs stay read-only because the VM mounts them read-only. Verifier tools remain
+limited to Read/Grep/Glob. Prompts still exclude source execution, tests, builds,
 network tools, and source edits, and the required command-trace validator is
 unchanged.
 
@@ -115,7 +140,7 @@ Only one runner may own an output directory at a time.
 For a six-unit local pilot queue using the identical production runner:
 
 ```sh
-python3 -B experiment/src/audit_queue.py --prepared results/exhaustive --mode exhaustive --out results/exhaustive-queue.json
+python3 -B experiment/src/review_queue.py --prepared results/exhaustive --mode exhaustive --out results/exhaustive-queue.json
 ./experiment/run-experiment.sh run exhaustive --reference /path/to/references --queue results/exhaustive-queue.json
 ```
 
@@ -139,7 +164,7 @@ context. `intended_source_commit` is pinned to the exact proposed-fix commit;
 selection rejects any other source revision. The manifest also records the actual
 HEAD independently.
 Only `.git/HEAD`, its loose ref, or `packed-refs` are read for commit metadata;
-no Git commands, configuration, hooks, credentials, or history are read.
+no Git commands, configuration, hooks, or history are used.
 Standalone checkouts and plain snapshots are supported. Snapshots record a null
 commit. Linked worktrees/external Git metadata are rejected instead of traversed.
 
@@ -160,8 +185,9 @@ When available on PATH, `ast-grep` (or an `sg` binary reporting itself as
 `ast-grep`) searches the configured structural patterns. Source is passed on
 stdin, parsed as C++ (including C/header inputs), with an explicit empty config
 inside output scratch space. It does not traverse the target, load target
-configuration, or inherit provider credentials. Installed-tool errors fail the
-run. Its version is recorded; use the same version when comparing preparations.
+configuration, or inherit provider environment variables. Installed-tool errors
+fail the run. Its version is recorded; use the same version when comparing
+preparations.
 The command format follows the [ast-grep CLI reference](https://ast-grep.github.io/reference/cli/run.html).
 
 If neither executable is available, selection announces and records the
@@ -207,7 +233,7 @@ but structural-match completeness is not independently re-proved. An interrupted
 write remains invalid and must be regenerated in a fresh output directory.
 Validation prints `PASS` or `FAIL` and returns nonzero for invalid state.
 
-## Plan or create the clean audit VM
+## Plan or create the review VM
 
 VMs must be created on host **`u`** unless explicitly overridden. The bootstrap
 reads the kernel fields for `uname -s` and `uname -m` (via Python's `os.uname`)
@@ -237,7 +263,7 @@ and QEMU already installed:
 ./experiment/bootstrap-lima.sh --create \
   --source /absolute/path/to/sonic-swss \
   --reference /absolute/path/to/reference-materials \
-  --results /absolute/path/to/audit-results
+  --results /absolute/path/to/review-results
 ```
 
 Run the bootstrap locally on the intended Linux host. The command validates the detected architecture and version pins before creating the VM.
@@ -266,10 +292,11 @@ YAML lives only in a private temporary directory, removed on success or failure.
 No permanent host YAML is written separately from Lima's managed VM state.
 
 Only source and references are mounted read-only, at `/mnt/source` and
-`/mnt/references`; the separate `/mnt/results` mount is writable. Host home,
-repository parent, host credentials, SSH keys/agent, and proxy credentials are
-never shared. Containerd and automatic port forwarding are disabled. Inputs
-must be dedicated source/reference trees, not directories containing credentials.
+`/mnt/references`; the separate `/mnt/results` mount is writable. The host home
+directory, the repository parent, SSH keys/agent, and proxy settings are not
+shared with the guest. Containerd and automatic port forwarding are disabled.
+Inputs must be dedicated source and reference trees, not general-purpose
+directories.
 The guest rejects a mismatched architecture before setup, then downloads a
 checksummed
 [Node 22.14.0 binary](https://nodejs.org/download/release/v22.14.0/SHASUMS256.txt)
@@ -298,7 +325,7 @@ limactl shell --workdir=/home/audit sonic-static-audit claude auth login
 
 [Codex device auth](https://developers.openai.com/codex/cli/reference/) and
 [Claude auth](https://code.claude.com/docs/en/cli-reference) are never run by
-bootstrap. This VM is for isolated **static-only** CLI audit sessions later.
+bootstrap. This VM hosts the later **static-only** CLI review sessions.
 Bootstrap does not execute source, run source builds/tests, install Docker,
 start virtual switches, invoke model agents, or mutate GitHub. Preparation
 remains local-only; explicit VM creation downloads its image and pinned tooling.

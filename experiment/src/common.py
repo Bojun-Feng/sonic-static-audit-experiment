@@ -8,7 +8,7 @@ import re
 import stat
 
 
-class AuditError(Exception):
+class ReviewError(Exception):
     """An invalid input or incomplete artifact set."""
 
 
@@ -27,7 +27,7 @@ RESTRICTIONS = {
 
 def require(condition, message):
     if not condition:
-        raise AuditError(message)
+        raise ReviewError(message)
 
 
 def keys(value, expected, label):
@@ -52,24 +52,24 @@ def read_json(path):
         return result
 
     def invalid_constant(value):
-        raise AuditError(f"{path.name}: invalid JSON constant {value}")
+        raise ReviewError(f"{path.name}: invalid JSON constant {value}")
 
     require(not path.is_symlink() and path.is_file(), f"missing regular file: {path}")
     try:
         return json.loads(path.read_bytes(), object_pairs_hook=unique,
                           parse_constant=invalid_constant)
     except (ValueError, UnicodeError) as exc:
-        raise AuditError(f"invalid JSON: {path.name}") from exc
+        raise ReviewError(f"invalid JSON: {path.name}") from exc
 
 
 def relative_path(value):
     require(isinstance(value, str) and value and "\\" not in value
             and all(ord(c) >= 32 and ord(c) != 127 for c in value),
-            "expected a safe relative POSIX path")
+            "expected a plain relative POSIX path")
     path = PurePosixPath(value)
     require(not path.is_absolute() and str(path) == value
             and all(part not in (".", "..") for part in path.parts)
-            and value != ".", f"unsafe relative path: {value}")
+            and value != ".", f"invalid relative path: {value}")
     return path
 
 
@@ -156,14 +156,14 @@ def validate_config(config):
             regex = re.compile(pattern["regex"].encode("ascii"), re.MULTILINE)
             require(regex.search(b"") is None, "regex must not match empty input")
         except (re.error, UnicodeError) as exc:
-            raise AuditError(f"invalid ASCII regex: {pattern['id']}") from exc
+            raise ReviewError(f"invalid ASCII regex: {pattern['id']}") from exc
         ids.append(pattern["id"])
     require(len(ids) == len(set(ids)), "duplicate pattern IDs")
     return config
 
 
 def source_commit(repo):
-    """Read only HEAD and refs, never Git configuration, hooks, or credentials.
+    """Read only HEAD and refs, never Git configuration, hooks, or history.
 
     Linked worktrees whose metadata lives outside this input are deliberately
     unsupported. A plain source snapshot has no commit, represented as null.
@@ -226,7 +226,7 @@ def collect_sources(repo, config):
         try:
             text = data.decode("utf-8").casefold()
         except UnicodeError as exc:
-            raise AuditError(f"source is not UTF-8: {path}") from exc
+            raise ReviewError(f"source is not UTF-8: {path}") from exc
         reasons = sorted(f"{kind}:{anchor}" for anchor in config["domain_anchors"]
                          for kind, value in (("path", path.casefold()), ("content", text))
                          if anchor in value)

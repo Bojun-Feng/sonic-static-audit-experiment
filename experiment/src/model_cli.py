@@ -5,8 +5,8 @@ import re
 import shlex
 from pathlib import Path
 
-from audit_queue import EXPERIMENT, runner_config
-from common import AuditError, json_bytes, require, within
+from review_queue import EXPERIMENT, runner_config
+from common import ReviewError, json_bytes, require, within
 
 
 def discovery_command(binary, model, work):
@@ -140,7 +140,7 @@ def parse_codex(events, answer, task, repo):
     try:
         require(messages and json.loads(messages[-1]) == answer, "Codex final message does not match result")
     except (ValueError, TypeError) as exc:
-        raise AuditError("invalid Codex final message") from exc
+        raise ReviewError("invalid Codex final message") from exc
     validate_inspection(events, task, repo)
     return {"session_id": started[0]["thread_id"], "usage": completed[0].get("usage")}
 

@@ -18,12 +18,12 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "experiment" / "src"
 sys.path.insert(0, str(SRC))
-from common import AuditError, json_bytes, read_json, source_commit, validate_config
+from common import ReviewError, json_bytes, read_json, source_commit, validate_config
 from extract import extract
 from validate import validate
 
 # Do not import this as "select": that name belongs to Python's I/O module.
-spec = importlib.util.spec_from_file_location("audit_selection", SRC / "select.py")
+spec = importlib.util.spec_from_file_location("selection_baseline", SRC / "select.py")
 selection = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(selection)
 
@@ -116,7 +116,7 @@ class BaselineTests(unittest.TestCase):
             self.prepare(mode="exhaustive")
         self.assertEqual(validate(self.out, mode="exhaustive"), (3, 0))
         self.assertFalse((self.out / "groups").exists())
-        with self.assertRaises(AuditError):
+        with self.assertRaises(ReviewError):
             validate(self.out, mode="targeted")
 
     def test_targeted_without_candidates_still_requires_extraction(self):
@@ -124,7 +124,7 @@ class BaselineTests(unittest.TestCase):
         with mock.patch.object(selection.shutil, "which", return_value=None), \
                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             selection.select(self.repo, self.config_path, self.out)
-            with self.assertRaises(AuditError):
+            with self.assertRaises(ReviewError):
                 validate(self.out)
             extract(self.repo, self.out / "selected-groups.json")
         self.assertEqual(validate(self.out), (3, 0))
@@ -143,7 +143,7 @@ class BaselineTests(unittest.TestCase):
                     self.put("src/new_route.cpp", b"// route\n")
                 else:
                     path.write_text("b" * 40 + "\n")
-                with self.assertRaises(AuditError):
+                with self.assertRaises(ReviewError):
                     validate(self.out)
                 path.write_bytes(original)
                 if action == "add":
@@ -154,7 +154,7 @@ class BaselineTests(unittest.TestCase):
                 redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             selection.select(self.repo, self.config_path, self.out)
         self.put("src/route.cpp", b"// route changed\n")
-        with self.assertRaises(AuditError):
+        with self.assertRaises(ReviewError):
             extract(self.repo, self.out / "selected-groups.json")
         self.assertFalse((self.out / "groups").exists())
 
@@ -199,10 +199,10 @@ class BaselineTests(unittest.TestCase):
                         name = "scope.json" if case == "symlink-scope" else "source-card.md"
                         (group_dir / name).unlink()
                         (group_dir / name).symlink_to(self.out / "groups" / group_id / name)
-                with self.assertRaises(AuditError):
+                with self.assertRaises(ReviewError):
                     validate(out)
 
-    def test_index_tampering_is_rejected(self):
+    def test_modified_index_is_rejected(self):
         self.prepare()
         original = read_json(self.out / "selected-groups.json")
         for case in ("traversal", "wrong-id", "range", "unknown-pattern", "omission", "hash", "type"):
@@ -224,28 +224,28 @@ class BaselineTests(unittest.TestCase):
                 else:
                     group["matches"][0]["start_line"] = True
                 (self.out / "selected-groups.json").write_bytes(json_bytes(index))
-                with self.assertRaises(AuditError):
+                with self.assertRaises(ReviewError):
                     validate(self.out)
 
     def test_source_and_output_boundaries_and_config(self):
         for bad_out in (self.repo, self.repo / "results", self.base):
-            with self.subTest(out=bad_out), self.assertRaises(AuditError):
+            with self.subTest(out=bad_out), self.assertRaises(ReviewError):
                 selection.select(self.repo, self.config_path, bad_out)
         for root in ("..", "../outside", "/absolute", ".git", "src/../outside", "src/linked-directory"):
             config = copy.deepcopy(self.config)
             config["source_roots"] = [root]
             self.config_path.write_bytes(json_bytes(config))
-            with self.subTest(root=root), self.assertRaises(AuditError):
+            with self.subTest(root=root), self.assertRaises(ReviewError):
                 selection.select(self.repo, self.config_path, self.out)
         config = copy.deepcopy(self.config)
         config["restrictions"]["provider_calls"] = True
-        with self.assertRaises(AuditError):
+        with self.assertRaises(ReviewError):
             validate_config(config)
 
     def test_pin_and_metadata_handling(self):
         self.config["intended_source_commit"] = "b" * 40
         self.config_path.write_bytes(json_bytes(self.config))
-        with self.assertRaises(AuditError):
+        with self.assertRaises(ReviewError):
             selection.select(self.repo, self.config_path, self.out)
         self.assertFalse(self.out.exists())
         (self.repo / ".git/refs/heads/main").unlink()
@@ -256,7 +256,7 @@ class BaselineTests(unittest.TestCase):
         shutil.rmtree(self.repo / ".git")
         self.assertIsNone(source_commit(self.repo))
         self.put(".git", b"gitdir: /not-allowed/metadata\n")
-        with self.assertRaises(AuditError):
+        with self.assertRaises(ReviewError):
             source_commit(self.repo)
 
     def test_ast_adapter_uses_stdin_and_isolated_config(self):
@@ -293,7 +293,7 @@ class BaselineTests(unittest.TestCase):
             with self.subTest(code=code, data=data), \
                     mock.patch.object(selection, "find_ast_grep", return_value=("/fake/ast-grep", "0.test")), \
                     mock.patch.object(selection.subprocess, "run", return_value=SimpleNamespace(returncode=code, stdout=data)), \
-                    self.assertRaises(AuditError):
+                    self.assertRaises(ReviewError):
                 selection.select(self.repo, self.config_path, self.out)
             self.assertFalse((self.out / "manifest.json").exists())
 
@@ -305,7 +305,7 @@ class BaselineTests(unittest.TestCase):
             self.assertEqual(selection.find_ast_grep(self.repo), (str(binary.resolve()), "0.test"))
             self.assertEqual(run.call_args.args[0][0], str(binary.resolve()))
         with mock.patch.object(selection.shutil, "which", return_value=str(self.repo / "ast-grep")), \
-                mock.patch.object(selection.subprocess, "run") as run, self.assertRaises(AuditError):
+                mock.patch.object(selection.subprocess, "run") as run, self.assertRaises(ReviewError):
             selection.find_ast_grep(self.repo)
         run.assert_not_called()
         with mock.patch.object(selection.shutil, "which", side_effect=[None, "/bin/sg"]), \

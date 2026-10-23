@@ -40,13 +40,13 @@ def hold_slot(root, lane, number):
 
 class SchedulerTests(unittest.TestCase):
     def test_production_limits(self):
-        from audit_queue import runner_config
+        from review_queue import runner_config
         config = runner_config()
         self.assertEqual(config["discovery_slots"], 16)
         self.assertEqual(config["verifier_slots"], 1)
 
     def test_scheduler_uses_configuration(self):
-        from audit_queue import runner_config
+        from review_queue import runner_config
         from scheduler import SlotPool
         from unittest import mock
         config = runner_config()
@@ -111,7 +111,7 @@ class SchedulerTests(unittest.TestCase):
 
     def test_locks_release_on_exception_and_reject_symlink_lock_files(self):
         from scheduler import SlotPool
-        from common import AuditError
+        from common import ReviewError
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             pool = SlotPool(root, "verifier")
@@ -123,7 +123,7 @@ class SchedulerTests(unittest.TestCase):
             lock = root / "verifier-0.lock"
             lock.unlink()
             lock.symlink_to(root / "outside")
-            with self.assertRaises((AuditError, OSError)), pool.acquire():
+            with self.assertRaises((ReviewError, OSError)), pool.acquire():
                 pass
 
 

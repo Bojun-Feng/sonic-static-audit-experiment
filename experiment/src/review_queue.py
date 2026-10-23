@@ -5,7 +5,7 @@ import argparse
 from pathlib import Path
 import sys
 
-from common import AuditError, json_bytes, keys, read_json, require, sha256, write_new
+from common import ReviewError, json_bytes, keys, read_json, require, sha256, write_new
 from validate import validate, load_selection
 
 EXPERIMENT = Path(__file__).resolve().parents[1]
@@ -84,7 +84,7 @@ def main():
     args = parser.parse_args()
     try:
         make_pilot_queue(args.prepared, args.mode, args.out, args.paths)
-    except (AuditError, OSError, UnicodeError) as exc:
+    except (ReviewError, OSError, UnicodeError) as exc:
         print(f"FAIL pilot queue: {exc}", file=sys.stderr)
         return 1
     print(f"Pilot queue: six {args.mode} units, twelve discovery sessions: {args.out}")

@@ -99,7 +99,7 @@ if kind == "codex":
                   "status": "completed", "exit_code": result.returncode,
                   "aggregated_output": result.stdout}})
     if failure == "partial":
-        emit({"type": "item.started", "item": {"type": "agent_message", "text": "INCOMPLETE-POISON"}})
+        emit({"type": "item.started", "item": {"type": "agent_message", "text": "INCOMPLETE-MARKER"}})
         Path(sys.argv[sys.argv.index("--output-last-message") + 1]).write_text('{"candidates": [')
     else:
         emit({"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps(answer)}})

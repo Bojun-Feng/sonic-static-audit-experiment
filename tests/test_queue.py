@@ -10,7 +10,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "experiment/src"))
-from common import AuditError, json_bytes, read_json
+from common import ReviewError, json_bytes, read_json
 
 
 class QueueTests(unittest.TestCase):
@@ -40,7 +40,7 @@ class QueueTests(unittest.TestCase):
                     extract(self.repo, out / "selected-groups.json")
 
     def test_production_and_pilot_use_same_units_and_models(self):
-        from audit_queue import build_tasks, make_pilot_queue
+        from review_queue import build_tasks, make_pilot_queue
         for mode in ("exhaustive", "targeted"):
             prepared = self.base / mode
             full = build_tasks(prepared, mode)
@@ -59,7 +59,7 @@ class QueueTests(unittest.TestCase):
                 self.assertTrue(all(Path(t["source_card"]).is_file() for t in tasks))
 
     def test_queue_rejects_wrong_mode_unknown_duplicate_and_stale_units(self):
-        from audit_queue import build_tasks, make_pilot_queue
+        from review_queue import build_tasks, make_pilot_queue
         prepared = self.base / "exhaustive"
         queue = self.base / "pilot.json"
         make_pilot_queue(prepared, "exhaustive", queue)
@@ -73,9 +73,9 @@ class QueueTests(unittest.TestCase):
             if case == "hash": value["manifest_sha256"] = "0" * 64
             if case == "empty": value["units"] = []
             queue.write_bytes(json_bytes(value))
-            with self.subTest(case=case), self.assertRaises(AuditError):
+            with self.subTest(case=case), self.assertRaises(ReviewError):
                 build_tasks(prepared, "exhaustive", queue)
-        with self.assertRaises(AuditError):
+        with self.assertRaises(ReviewError):
             build_tasks(prepared, "targeted")
 
 

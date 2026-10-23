@@ -13,12 +13,13 @@ from pathlib import Path
 import stat
 import time
 
-from audit_queue import runner_config
+from review_queue import runner_config
 from common import require
 
 
 def global_root():
-    # Deliberately independent of output, mode, model, HOME and TMPDIR.
+    # Deliberately independent of output, mode, model, HOME and TMPDIR. The
+    # legacy directory name is shared with already-running runners; keep it.
     return Path("/tmp") / f"sonic-static-audit-{os.getuid()}"
 
 
@@ -27,7 +28,7 @@ def open_lock(path):
     info = os.fstat(fd)
     try:
         require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
-                and info.st_nlink == 1, "unsafe lock file")
+                and info.st_nlink == 1, "invalid lock file")
     except BaseException:
         os.close(fd)
         raise
@@ -49,7 +50,7 @@ class SlotPool:
         self.limit = runner_config()[f"{lane}_slots"]
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
         require(not root.is_symlink() and root.is_dir() and root.stat().st_uid == os.getuid(),
-                "unsafe global semaphore directory")
+                "invalid global semaphore directory")
 
     @contextmanager
     def acquire(self):

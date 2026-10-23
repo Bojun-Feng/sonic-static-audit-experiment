@@ -6,7 +6,7 @@ from pathlib import Path
 import re
 import sys
 
-from common import (AuditError, collect_sources, exact_children, group_for, json_bytes,
+from common import (ReviewError, collect_sources, exact_children, group_for, json_bytes,
                     keys, match_location, read_json, regex_matches, render_group, require, sha256,
                     sorted_matches, source_and_output, source_commit, validate_config, within)
 
@@ -136,7 +136,7 @@ def main():
     args = parser.parse_args()
     try:
         files, groups = validate(args.out, args.repo, args.mode)
-    except (AuditError, OSError, UnicodeError) as exc:
+    except (ReviewError, OSError, UnicodeError) as exc:
         print(f"FAIL validation: {exc}", file=sys.stderr)
         return 1
     print(f"PASS validation: {files} files, {groups} groups")

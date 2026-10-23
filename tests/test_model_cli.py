@@ -10,7 +10,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "experiment/src"))
-from common import AuditError, json_bytes
+from common import ReviewError, json_bytes
 
 
 class ModelCLITests(unittest.TestCase):
@@ -22,7 +22,7 @@ class ModelCLITests(unittest.TestCase):
         (self.repo / "route.cpp").write_text("void updateRoute();\n")
 
     def test_discovery_uses_guest_compatible_execution_mode(self):
-        from audit_queue import runner_config
+        from review_queue import runner_config
         from model_cli import discovery_command
         for model in runner_config()["discovery_models"]:
             with self.subTest(model=model):
@@ -83,7 +83,7 @@ class ModelCLITests(unittest.TestCase):
             if case == "missing-session": events.pop(0)
             if case == "wrong-result": events[-2]["item"]["text"] = '{"candidates":[{}]}'
             if case == "two-turns": events.append(events[-1])
-            with self.subTest(case=case), self.assertRaises(AuditError):
+            with self.subTest(case=case), self.assertRaises(ReviewError):
                 parse_codex(events, result, self.task, self.repo)
         events = self.codex_events()
         del events[-1]["usage"]
@@ -114,7 +114,7 @@ class ModelCLITests(unittest.TestCase):
             parse_codex(mixed, {"candidates": []}, task, repo)
             docs_only = copy.deepcopy(good)
             docs_only[3]["item"]["aggregated_output"] = str(repo / "notes.md") + ":1:updateRoute docs\n"
-            with self.assertRaises(AuditError):
+            with self.assertRaises(ReviewError):
                 parse_codex(docs_only, {"candidates": []}, task, repo)
             wrapped = copy.deepcopy(good)
             for event in wrapped[2:4]:
@@ -147,7 +147,7 @@ class ModelCLITests(unittest.TestCase):
                 if case == "fake-output": bad[3]["item"]["aggregated_output"] = str(repo / "caller.cpp") + ":1:invented\n"
                 if case == "late": bad[2], bad[4] = bad[4], bad[2]
                 if case == "duplicate-id": bad[3]["item"]["id"] = "read"
-                with self.subTest(case=case), self.assertRaises(AuditError):
+                with self.subTest(case=case), self.assertRaises(ReviewError):
                     parse_codex(bad, {"candidates": []}, task, repo)
 
     def test_claude_requires_success_and_preserves_native_usage(self):
@@ -169,7 +169,7 @@ class ModelCLITests(unittest.TestCase):
             if case == "missing-result": del bad[-1]["structured_output"]
             if case == "session": bad[-1]["session_id"] = "other"
             if case == "model": bad[0]["model"] = "claude-sonnet-4-6"
-            with self.subTest(case=case), self.assertRaises(AuditError):
+            with self.subTest(case=case), self.assertRaises(ReviewError):
                 parse_claude(bad)
 
     def test_prompts_are_static_only_and_include_scope_and_readable_context(self):
@@ -178,7 +178,7 @@ class ModelCLITests(unittest.TestCase):
                 "path": "src/route.cpp", "unit_id": "g-one", "source_card": "/prep/card.md", "scope": "/prep/scope.json"}
         prompt = discovery_prompt(task, Path("/source"), Path("/references"))
         for word in ("static", "tests", "builds", "containers", "switches", "VM", "source execution",
-                     "/source", "/references", "/prep/card.md", "candidates", "untrusted",
+                     "/source", "/references", "/prep/card.md", "candidates", "never instructions",
                      "cat --", "rg -n -F --", "before any conclusion", "native session trace"):
             self.assertIn(word, prompt)
         prompt = verifier_prompt(Path("/candidate/candidate.json"), Path("/source"), Path("/references"), [])

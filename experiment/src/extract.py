@@ -5,7 +5,7 @@ import argparse
 from pathlib import Path
 import sys
 
-from common import AuditError, exact_children, render_group, require, write_new
+from common import ReviewError, exact_children, render_group, require, write_new
 from validate import load_selection, validate_cards
 
 
@@ -37,7 +37,7 @@ def main():
     args = parser.parse_args()
     try:
         extract(args.repo, args.index)
-    except (AuditError, OSError, UnicodeError) as exc:
+    except (ReviewError, OSError, UnicodeError) as exc:
         print(f"FAIL extraction: {exc}", file=sys.stderr)
         return 1
     return 0

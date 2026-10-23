@@ -23,7 +23,7 @@ esac
 
 # Use only guest-local scratch, never a source/reference working directory.
 cd /
-guest_work=$(mktemp -d /tmp/sonic-static-audit.XXXXXXXX)
+guest_work=$(mktemp -d /tmp/review-setup.XXXXXXXX)
 trap 'rm -rf -- "$guest_work"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM HUP
@@ -45,6 +45,7 @@ with urllib.request.urlopen(url, timeout=60) as response, open(target, "xb") as 
 if digest.hexdigest() != expected:
     raise SystemExit("Node archive SHA-256 mismatch")
 PY
+# /opt/audit-node and /opt/audit-clis are legacy guest paths kept for the existing VM.
 sudo install -d -m 0755 /opt/audit-node
 sudo tar -xzf "$guest_work/node.tar.gz" --strip-components=1 -C /opt/audit-node
 sudo ln -s /opt/audit-node/bin/node /usr/local/bin/node

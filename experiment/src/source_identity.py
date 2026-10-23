@@ -13,7 +13,7 @@ import re
 import stat
 import sys
 
-from common import AuditError, json_bytes, keys, read_json, require, sha256, write_new
+from common import ReviewError, json_bytes, keys, read_json, require, sha256, write_new
 
 
 def snapshot_digest(repo):
@@ -72,7 +72,7 @@ def main():
     args = parser.parse_args()
     try:
         bind(args.repo, args.commit, args.out)
-    except (AuditError, OSError) as exc:
+    except (ReviewError, OSError) as exc:
         print(f"FAIL identity: {exc}", file=sys.stderr)
         return 1
     print(f"Bound source identity: {args.out}")

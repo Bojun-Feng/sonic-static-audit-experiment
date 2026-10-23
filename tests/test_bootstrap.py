@@ -20,7 +20,7 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "experiment/src"))
 import bootstrap_lima as bootstrap
-from common import AuditError, validate_config
+from common import ReviewError, validate_config
 
 
 class BootstrapTests(unittest.TestCase):
@@ -114,9 +114,9 @@ else:
         self.env = {"PATH": str(self.bin) + os.pathsep + os.defpath,
                     "TMPDIR": str(self.scratch), "LIMA_HOME": str(self.lima_state),
                     "PYTHONDONTWRITEBYTECODE": "1",
-                    # Synthetic canaries, never read actual credentials.
-                    "OPENAI_API_KEY": "test-canary", "ANTHROPIC_API_KEY": "test-canary",
-                    "SSH_AUTH_SOCK": "/test-canary", "HTTPS_PROXY": "test-canary"}
+                    # Synthetic placeholder values; real tokens are never read.
+                    "OPENAI_API_KEY": "test-placeholder", "ANTHROPIC_API_KEY": "test-placeholder",
+                    "SSH_AUTH_SOCK": "/test-placeholder", "HTTPS_PROXY": "test-placeholder"}
 
     def invoke(self, *args):
         return subprocess.run(["/bin/bash", str(ROOT / "experiment/bootstrap-lima.sh"), *args],
@@ -262,7 +262,7 @@ else:
                 values = bootstrap.expected_receipt(self.versions, self.profile)
                 values[key] = "wrong-profile"
                 receipt.write_text("".join(f"{k}={v}\n" for k, v in values.items()))
-                with self.assertRaisesRegex(AuditError, "does not match"):
+                with self.assertRaisesRegex(ReviewError, "does not match"):
                     bootstrap.verify_receipt(self.paths[2], self.versions, self.profile)
 
     def test_create_uses_exact_dry_run_config_and_script(self):
@@ -279,7 +279,7 @@ else:
         config_path = (self.base / "config-path.txt").read_text()
         for actual, expected in zip(self.calls()[2:], bootstrap.commands(config_path, self.versions, self.profile)):
             self.assertEqual(actual["args"], expected[1:])
-            self.assertIn(shlex.join(["limactl", *actual["args"]]).replace(config_path, "<scratch>/audit.yaml")
+            self.assertIn(shlex.join(["limactl", *actual["args"]]).replace(config_path, "<scratch>/review-vm.yaml")
                           if actual["args"][0] != "create" else "limactl create --tty=false", plan.stdout)
         for call in self.calls():
             self.assertTrue({"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "SSH_AUTH_SOCK", "HTTPS_PROXY"}
@@ -432,7 +432,7 @@ else:
         for value in ("latest", "^1.2.3", "~1.2.3", "1.2", "1.2.3; touch bad", "01.2.3", 123):
             config = copy.deepcopy(self.config)
             config["guest_cli_versions"]["codex"] = value
-            with self.subTest(value=value), self.assertRaises(AuditError):
+            with self.subTest(value=value), self.assertRaises(ReviewError):
                 validate_config(config)
         config = copy.deepcopy(self.config)
         del config["guest_cli_versions"]
