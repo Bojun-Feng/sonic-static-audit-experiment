@@ -112,17 +112,46 @@ but structural-match completeness is not independently re-proved. An interrupted
 write remains invalid and must be regenerated in a fresh output directory.
 Validation prints `PASS` or `FAIL` and returns nonzero for invalid state.
 
-## Create the clean audit VM
+## Plan or create the clean audit VM
 
-On Apple Silicon/macOS with Lima **2.2.1** installed:
+VMs must be created on host **`u`** unless explicitly overridden. The bootstrap
+reads the kernel fields for `uname -s` and `uname -m` (via Python's `os.uname`)
+and selects exactly one supported profile; it never guesses from installed tools:
+
+| Host | Required Lima | VM / Ubuntu 24.04 image | CPUs | Memory | Disk | Mounts |
+| --- | --- | --- | --- | --- | --- | --- |
+| Linux / x86_64 (`u`) | **2.0.3** | QEMU / AMD64 | **8** | **32 GiB** | **200 GiB** | 9p |
+| macOS / arm64 (explicitly supported) | **2.2.1** | VZ / ARM64 | 4 | 8 GiB | 40 GiB | virtiofs |
+
+Other OS/architecture pairs, including Intel macOS and ARM Linux, are rejected
+even in dry-run and even with a host override. Linux creation also requires
+`qemu-system-x86_64` and `qemu-img` on PATH, outside all mounts. Bootstrap checks
+their availability without executing them; Lima uses them during explicit
+creation. Host tools are never installed by bootstrap.
+
+Preview the current host's exact configuration without Lima or QEMU installed:
 
 ```sh
 ./experiment/bootstrap-lima.sh --dry-run
+```
+
+For a later, explicitly requested creation, run on **`u`** with Lima **2.0.3**
+and QEMU already installed:
+
+```sh
 ./experiment/bootstrap-lima.sh --create \
   --source /absolute/path/to/sonic-swss \
   --reference /absolute/path/to/reference-materials \
   --results /absolute/path/to/audit-results
 ```
+
+The short hostname from `uname -n` must be `u` (`u.example.test` also qualifies).
+Creation elsewhere fails before invoking Lima or creating scratch files. Only an
+explicit `--allow-other-host` on that invocation overrides this restriction;
+it does not override the detected architecture, version pins, or other checks.
+Apple Silicon creation requires this flag. Dry-run works on the supported Mac
+without an override and prints its ARM64 profile, the host policy, and override
+status. There is no option to select a foreign host profile.
 
 All three paths must be existing, absolute, disjoint directories; results must
 be empty. Home directories, the repository parent, hidden directories, and
@@ -132,9 +161,11 @@ no paths it uses labeled placeholders. Dry-run never invokes Lima, downloads,
 creates scratch files, or changes VM state. No-argument invocation is an error.
 
 The [create command](https://lima-vm.io/docs/reference/limactl_create/) uses a
-literal config: VM `sonic-static-audit`, VZ/ARM64, 4 CPUs, 8 GiB RAM, 40 GiB disk,
-and the existing Ubuntu 24.04 image dated 2026-10-17 with its pinned
+literal config for VM `sonic-static-audit`, with the profile's explicit resources
+and Ubuntu 24.04 image dated 2026-10-17, verified against its architecture-specific
 [SHA-256](https://cloud-images.ubuntu.com/releases/noble/release-20261017/SHA256SUMS).
+Linux explicitly selects [QEMU](https://lima-vm.io/docs/config/vmtype/qemu/) and
+9p, as supported by the [Lima 2.0.3 configuration](https://github.com/lima-vm/lima/blob/v2.0.3/templates/default.yaml).
 It refuses an existing VM, including stopped or partial state. Inherited Lima
 `_config/default.yaml` or `override.yaml` is refused; use a clean, absolute
 `LIMA_HOME` if needed, and keep that same environment for later manual commands.
@@ -147,16 +178,20 @@ Only source and references are mounted read-only, at `/mnt/source` and
 repository parent, host credentials, SSH keys/agent, and proxy credentials are
 never shared. Containerd and automatic port forwarding are disabled. Inputs
 must be dedicated source/reference trees, not directories containing credentials.
-The guest downloads a checksummed
+The guest rejects a mismatched architecture before setup, then downloads a
+checksummed
 [Node 22.14.0 binary](https://nodejs.org/download/release/v22.14.0/SHASUMS256.txt)
-and installs the exact npm versions in `experiment/config.json`:
-Codex **0.157.1** and Claude Code **2.1.302**. npm lifecycle scripts are disabled;
-no package source compilation is allowed. CLI wrappers disable automatic updates.
+(Linux x64 for the AMD64 guest, Linux arm64 for the ARM64 guest) and installs the
+exact npm versions in `experiment/config.json`: Codex **0.157.1** and Claude Code
+**2.1.302**. Codex npm lifecycle scripts are disabled; Claude Code's official
+postinstall remains enabled to fetch its pinned platform binary. No package
+source compilation is allowed. CLI wrappers disable automatic updates.
 
 Guest setup runs only version probes, verifies them against the pins, and writes
-`/mnt/results/setup-receipt.txt`. Host validation requires that final receipt to
-be the only result. A failure during creation, start, setup, receipt validation,
-or a caught interrupt destroys the new VM, removes an incomplete receipt, and
+`/mnt/results/setup-receipt.txt`, including the guest architecture and Node archive
+checksum. Host validation requires that final receipt to be the only result and
+match the selected profile and CLI pins. A failure during creation, start, setup,
+receipt validation, or a caught interrupt destroys the new VM, removes an incomplete receipt, and
 cleans temporary config. **A retry starts from scratch.** It never patches or
 repairs an existing VM. If Lima itself cannot delete the VM, the script fails
 with the exact manual delete command; do not reuse that partial VM. Unexpected
@@ -179,18 +214,26 @@ remains local-only; explicit VM creation downloads its image and pinned tooling.
 ## Local verification
 
 ```sh
-python3 -B -m unittest discover -s tests -v
+mkdir -p results/local-test-tmp
+TMPDIR="$PWD/results/local-test-tmp" python3 -B -m unittest discover -s tests -v
 bash -n experiment/bootstrap-lima.sh
 bash -n experiment/guest-setup.sh
 bash -n experiment/run-experiment.sh
 ./experiment/bootstrap-lima.sh --dry-run
+rmdir results/local-test-tmp
 ```
 
 Tests use disposable OS temporary directories (or the caller's `TMPDIR`) for all
-fixtures and outputs, with output outside each source fixture. They never use
-`results/exhaustive` or `results/targeted`; generated baseline results are not
+fixtures and outputs, with output outside each source fixture. The commands above
+keep every test write inside this repository; `TMPDIR` must be an absolute path
+with no hidden directory components because mount validation rejects those.
+Tests never use `results/exhaustive` or `results/targeted`; generated baseline results are not
 retained in this repository. The suite exercises both preparation commands,
 deterministic filtering/extraction/validation, mocked ast-grep, and mocked Lima
-creation, refusal, rendering, receipt validation, and failure cleanup. C/C++
-fixtures are text only, never compiled or executed. No VM or real provider CLI
+creation, refusal, rendering, receipt validation, and failure cleanup under both
+Linux/x86_64 and macOS/arm64 identities. It also checks the `u` host restriction
+and explicit override, unsupported hosts, QEMU prerequisites, exact profile pins,
+and mutation-free dry-runs. Both profiles are tested locally with mocked kernel
+identity; verification never connects to `u`. C/C++ fixtures are text only, never
+compiled or executed. No VM or real provider CLI
 is used in verification. Tests need only the Python standard library and Bash.

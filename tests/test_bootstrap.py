@@ -24,6 +24,9 @@ from common import AuditError, validate_config
 
 
 class BootstrapTests(unittest.TestCase):
+    HOST = ("Linux", "u", "test-release", "test-version", "x86_64")
+    CREATE_FLAGS = ()
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="bootstrap-test-")
         self.addCleanup(self.temp.cleanup)
@@ -34,13 +37,30 @@ class BootstrapTests(unittest.TestCase):
         self.lima_state = self.base / "lima-state"
         for path in (*self.paths, self.bin, self.scratch, self.lima_state):
             path.mkdir()
-        (self.bin / "python3").symlink_to(sys.executable)
+        # Test the real Bash entry point with kernel identity mocked inside its
+        # Python child. No platform override exists in the production CLI.
+        launcher = self.bin / "python3"
+        launcher.write_text(f"#!{sys.executable} -B\n" + "import json, os, runpy, sys\n"
+                            + f"with open({str(self.base / 'scenario.json')!r}) as stream:\n"
+                            + "    host = os.uname_result(json.load(stream)['host'])\n"
+                            + "os.uname = lambda: host\n"
+                            + "assert sys.argv[1] == '-B'\n"
+                            + "sys.argv = sys.argv[2:]\n"
+                            + "sys.path.insert(0, os.path.dirname(sys.argv[0]))\n"
+                            + "runpy.run_path(sys.argv[0], run_name='__main__')\n")
+        launcher.chmod(0o755)
+        for name in ("qemu-system-x86_64", "qemu-img"):
+            binary = self.bin / name
+            binary.write_text("#!/bin/sh\nexit 99 # Must never be executed by bootstrap tests.\n")
+            binary.chmod(0o755)
         # dirname is needed by the Bash entry point even in the missing-Lima test.
         (self.bin / "dirname").symlink_to(shutil.which("dirname"))
         self.config = json.loads((ROOT / "experiment/config.json").read_text())
         self.versions = self.config["guest_cli_versions"]
+        with mock.patch.object(bootstrap.os, "uname", return_value=os.uname_result(self.HOST)):
+            self.profile = bootstrap.host_profile()
         self.scenario = self.base / "scenario.json"
-        self.scenario.write_text("{}")
+        self.scenario_is()
         self.log = self.base / "calls.jsonl"
         self.fake = self.bin / "limactl"
         self.fake.write_text(f"#!{sys.executable} -B\n" + "import json, os, pathlib, signal, stat, sys\n"
@@ -53,7 +73,7 @@ command = args[0]
 if scenario.get("fail") == command and command not in ("create", "shell"):
     sys.exit(23)
 if command == "--version":
-    print("limactl version " + scenario.get("version", "2.2.1"))
+    print("limactl version " + scenario["version"])
 elif command == "list":
     print(scenario.get("existing", "unrelated-vm"))
 elif command == "create":
@@ -88,7 +108,7 @@ else:
     raise AssertionError(args)
 ''')
         self.fake.chmod(0o755)
-        receipt = bootstrap.expected_receipt(self.versions)
+        receipt = bootstrap.expected_receipt(self.versions, self.profile)
         (self.base / "expected-receipt.txt").write_text(
             "".join(f"{key}={value}\n" for key, value in receipt.items()))
         self.env = {"PATH": str(self.bin) + os.pathsep + os.defpath,
@@ -103,6 +123,9 @@ else:
                               cwd=self.base, env=self.env, text=True, capture_output=True,
                               check=False, timeout=15)
 
+    def create(self, *args):
+        return self.invoke("--create", *self.CREATE_FLAGS, *args)
+
     def path_args(self, paths=None):
         return [part for label, path in zip(("source", "reference", "results"), paths or self.paths)
                 for part in (f"--{label}", str(path))]
@@ -111,7 +134,7 @@ else:
         return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
 
     def scenario_is(self, **kwargs):
-        self.scenario.write_text(json.dumps(kwargs))
+        self.scenario.write_text(json.dumps({"host": self.HOST, "version": self.profile["lima"], **kwargs}))
 
     def assert_clean_scratch(self):
         self.assertEqual(list(self.scratch.iterdir()), [])
@@ -119,6 +142,8 @@ else:
             self.assertFalse(Path((self.base / "config-path.txt").read_text()).parent.exists())
 
     def test_dry_run_is_deterministic_without_lima_or_writes(self):
+        before = {str(p.relative_to(self.base)): p.read_bytes() if p.is_file() else None
+                  for p in self.base.rglob("*")}
         first = self.invoke("--dry-run")
         second = self.invoke("--dry-run")
         self.assertEqual(first.returncode, 0, first.stderr)
@@ -130,13 +155,128 @@ else:
         self.assertIn("claude auth login", first.stdout)
         self.assertIn("limactl delete --force sonic-static-audit", first.stdout)
         self.assertIn("A retry starts from scratch", first.stdout)
+        self.assertEqual(before, {str(p.relative_to(self.base)): p.read_bytes() if p.is_file() else None
+                                  for p in self.base.rglob("*")})
         self.fake.unlink()
+        for name in ("qemu-system-x86_64", "qemu-img"):
+            (self.bin / name).unlink()
         self.assertEqual(self.invoke("--dry-run").stdout, first.stdout)
+
+    def test_dry_run_selects_exact_native_profile(self):
+        plan = self.invoke("--dry-run")
+        self.assertEqual(plan.returncode, 0, plan.stderr)
+        yaml = plan.stdout.split("--- BEGIN LIMA YAML ---\n")[1].split("--- END LIMA YAML ---")[0]
+        if self.HOST[0] == "Linux":
+            expected = ('minimumLimaVersion: "2.0.3"', "vmType: qemu", "arch: x86_64", "cpus: 8",
+                        "memory: 32GiB", "disk: 200GiB", "mountType: 9p",
+                        "ubuntu-24.04-server-cloudimg-amd64.img",
+                        "04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94")
+            self.assertIn("qemu-system-x86_64 and qemu-img", plan.stdout)
+            node_hash = "9d942932535988091034dc94cc5f42b6dc8784d6366df3a36c4c9ccb3996f0c2"
+        else:
+            expected = ('minimumLimaVersion: "2.2.1"', "vmType: vz", "arch: aarch64", "cpus: 4",
+                        "memory: 8GiB", "disk: 40GiB", "mountType: virtiofs",
+                        "ubuntu-24.04-server-cloudimg-arm64.img",
+                        "50e24e1fb79e89116e939d90aa7738f7af48c442fa1bc2510131e0b39c50348e")
+            self.assertNotIn("qemu-system-x86_64 and qemu-img", plan.stdout)
+            node_hash = "8cf30ff7250f9463b53c18f89c6c606dfda70378215b2c905d0a9a8b08bd45e0"
+        for literal in expected:
+            self.assertIn(literal, yaml)
+        self.assertIn(node_hash, plan.stdout)
+        self.assertIn(f"Host profile: {self.HOST[0]}/{self.HOST[4]} (uname -s/-m).", plan.stdout)
+        self.assertIn("https://cloud-images.ubuntu.com/releases/noble/release-20261017/", yaml)
+        self.assertIn("short hostname 'u'", plan.stdout)
+        self.assertIn("other-host override disabled", plan.stdout)
+
+    def test_other_hosts_require_explicit_creation_override(self):
+        host = list(self.HOST)
+        host[1] = "another-host"
+        self.scenario_is(host=host)
+        self.assertEqual(self.invoke("--dry-run", *self.path_args()).returncode, 0)
+        result = self.invoke("--create", *self.path_args())
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("restricted to host 'u'", result.stderr)
+        self.assertIn("--allow-other-host", result.stderr)
+        self.assertEqual(self.calls(), [])
+        self.assert_clean_scratch()
+        result = self.invoke("--create", "--allow-other-host", *self.path_args())
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_u_fully_qualified_hostname_is_allowed(self):
+        host = list(self.HOST)
+        host[1] = "u.example.test"
+        self.scenario_is(host=host)
+        result = self.invoke("--create", *self.path_args())
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_unsupported_hosts_fail_before_lima_even_with_override(self):
+        for system, machine in (("Linux", "aarch64"), ("Darwin", "x86_64"),
+                                ("FreeBSD", "x86_64"), ("Darwin", "aarch64")):
+            self.scenario_is(host=[system, "u", "test-release", "test-version", machine])
+            for mode in ("--dry-run", "--create"):
+                with self.subTest(host=(system, machine), mode=mode):
+                    result = self.invoke(mode, "--allow-other-host", *self.path_args())
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(f"unsupported host {system}/{machine}", result.stderr)
+                    self.assertEqual(result.stdout, "")
+        self.assertEqual(self.calls(), [])
+        self.assert_clean_scratch()
+
+    def test_qemu_prerequisites_are_required_only_for_linux_and_outside_mounts(self):
+        self.env["PATH"] = str(self.bin)  # Never discover a real host QEMU binary.
+        for name in ("qemu-system-x86_64", "qemu-img"):
+            binary = self.bin / name
+            original = binary.read_bytes()
+            binary.unlink()
+            if self.HOST[0] == "Darwin":
+                continue
+            result = self.create(*self.path_args())
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(f"QEMU prerequisite {name} is unavailable", result.stderr)
+            for mount in self.paths:
+                with self.subTest(binary=name, mount=mount):
+                    mounted_binary = mount / name
+                    mounted_binary.write_bytes(original)
+                    mounted_binary.chmod(0o755)
+                    binary.symlink_to(mounted_binary)
+                    result = self.create(*self.path_args())
+                    self.assertNotEqual(result.returncode, 0)
+                    # Results must be empty even before tool validation.
+                    self.assertIn("must be empty" if mount == self.paths[2] else
+                                  f"{name} must not be an executable", result.stderr)
+                    binary.unlink()
+                    mounted_binary.unlink()
+            binary.write_bytes(original)
+            binary.chmod(0o755)
+        if self.HOST[0] == "Darwin":
+            result = self.create(*self.path_args())
+            self.assertEqual(result.returncode, 0, result.stderr)
+        else:
+            self.assertEqual(self.calls(), [])
+        self.assert_clean_scratch()
+
+    def test_other_profile_lima_version_is_refused(self):
+        self.scenario_is(version="2.2.1" if self.HOST[0] == "Linux" else "2.0.3")
+        result = self.create(*self.path_args())
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f"Lima version mismatch: require {self.profile['lima']}", result.stderr)
+        self.assertEqual([call["args"][0] for call in self.calls()], ["--version"])
+        self.assert_clean_scratch()
+
+    def test_receipt_is_bound_to_profile_and_runtime_checksum(self):
+        receipt = self.paths[2] / "setup-receipt.txt"
+        for key in ("lima", "ubuntu_sha256", "guest_arch", "node_sha256"):
+            with self.subTest(key=key):
+                values = bootstrap.expected_receipt(self.versions, self.profile)
+                values[key] = "wrong-profile"
+                receipt.write_text("".join(f"{k}={v}\n" for k, v in values.items()))
+                with self.assertRaisesRegex(AuditError, "does not match"):
+                    bootstrap.verify_receipt(self.paths[2], self.versions, self.profile)
 
     def test_create_uses_exact_dry_run_config_and_script(self):
         plan = self.invoke("--dry-run", *self.path_args())
         self.assertEqual(plan.returncode, 0, plan.stderr)
-        result = self.invoke("--create", *self.path_args())
+        result = self.create(*self.path_args())
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual([call["args"][0] for call in self.calls()],
                          ["--version", "list", "create", "start", "shell"])
@@ -145,7 +285,7 @@ else:
         guest = plan.stdout.split("--- BEGIN GUEST SCRIPT ---\n")[1].split("--- END GUEST SCRIPT ---")[0]
         self.assertEqual(guest, (self.base / "guest.sh").read_text())
         config_path = (self.base / "config-path.txt").read_text()
-        for actual, expected in zip(self.calls()[2:], bootstrap.commands(config_path, self.versions)):
+        for actual, expected in zip(self.calls()[2:], bootstrap.commands(config_path, self.versions, self.profile)):
             self.assertEqual(actual["args"], expected[1:])
             self.assertIn(shlex.join(["limactl", *actual["args"]]).replace(config_path, "<scratch>/audit.yaml")
                           if actual["args"][0] != "create" else "limactl create --tty=false", plan.stdout)
@@ -158,13 +298,13 @@ else:
         for setting in ("forwardAgent: false", "loadDotSSHPubKeys: false", "propagateProxyEnv: false",
                         "system: false", "user: false", "ignore: true"):
             self.assertIn(setting, rendered)
-        bootstrap.verify_receipt(self.paths[2], self.versions)
+        bootstrap.verify_receipt(self.paths[2], self.versions, self.profile)
         self.assertIn("codex login --device-auth", result.stdout)
         self.assert_clean_scratch()
 
     def test_existing_vm_is_never_started_or_deleted(self):
         self.scenario_is(existing=bootstrap.VM_NAME)
-        result = self.invoke("--create", *self.path_args())
+        result = self.create(*self.path_args())
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("already exists", result.stderr)
         self.assertEqual([c["args"][0] for c in self.calls()], ["--version", "list"])
@@ -173,7 +313,7 @@ else:
     def test_partial_existing_state_and_global_overrides_are_refused(self):
         vm = self.lima_state / bootstrap.VM_NAME
         vm.mkdir()
-        result = self.invoke("--create", *self.path_args())
+        result = self.create(*self.path_args())
         self.assertIn("already exists", result.stderr)
         self.assertTrue(vm.is_dir())
         vm.rmdir()
@@ -182,7 +322,7 @@ else:
         for name in ("default.yaml", "override.yaml"):
             path = directory / name
             path.write_text("must never be loaded")
-            result = self.invoke("--create", *self.path_args())
+            result = self.create(*self.path_args())
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("refusing inherited Lima configuration", result.stderr)
             path.unlink()
@@ -190,16 +330,16 @@ else:
 
     def test_bad_version_missing_binary_and_inventory_failure_are_nonmutating(self):
         self.scenario_is(version="0.0.0")
-        result = self.invoke("--create", *self.path_args())
+        result = self.create(*self.path_args())
         self.assertIn("version mismatch", result.stderr)
         self.assertEqual([c["args"][0] for c in self.calls()], ["--version"])
         self.scenario_is(fail="list")
-        result = self.invoke("--create", *self.path_args())
+        result = self.create(*self.path_args())
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse(any(c["args"][0] == "create" for c in self.calls()))
         self.fake.unlink()
         self.env["PATH"] = str(self.bin)
-        result = self.invoke("--create", *self.path_args())
+        result = self.create(*self.path_args())
         self.assertIn("unavailable", result.stderr)
         self.assertNotEqual(result.returncode, 0)
         self.assert_clean_scratch()
@@ -210,7 +350,7 @@ else:
         for scenario in cases:
             with self.subTest(scenario=scenario):
                 self.scenario_is(**scenario)
-                result = self.invoke("--create", *self.path_args())
+                result = self.create(*self.path_args())
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(self.calls()[-1]["args"], ["delete", "--force", bootstrap.VM_NAME])
                 self.assertIn("A retry starts from scratch", result.stderr)
@@ -225,7 +365,7 @@ else:
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             with self.subTest(signal=sig):
                 self.scenario_is(signal=sig)
-                result = self.invoke("--create", *self.path_args())
+                result = self.create(*self.path_args())
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(self.calls()[-1]["args"], ["delete", "--force", bootstrap.VM_NAME])
                 self.assertFalse((self.lima_state / bootstrap.VM_NAME).exists())
@@ -233,7 +373,7 @@ else:
 
     def test_cleanup_failure_is_explicit_and_never_claims_success(self):
         self.scenario_is(bad_receipt=True, fail="delete")
-        result = self.invoke("--create", *self.path_args())
+        result = self.create(*self.path_args())
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("VM deletion failed", result.stderr)
         self.assertIn("do not reuse the partial VM", result.stderr)
@@ -247,7 +387,7 @@ else:
                 with self.subTest(variable=key, mount=path):
                     original = self.env[key]
                     self.env[key] = str(path)
-                    result = self.invoke("--create", *self.path_args())
+                    result = self.create(*self.path_args())
                     self.env[key] = original
                     self.assertNotEqual(result.returncode, 0)
                     self.assertIn("outside", result.stderr)
@@ -277,10 +417,10 @@ else:
         for bad_source in ("relative", missing, file, link, hidden, template, Path("/"),
                            Path.home(), ROOT.parent, reference, results, template_alias / "child"):
             with self.subTest(source=bad_source):
-                result = self.invoke("--create", *self.path_args((bad_source, reference, results)))
+                result = self.create(*self.path_args((bad_source, reference, results)))
                 self.assertNotEqual(result.returncode, 0)
         (results / "old.txt").write_text("keep me")
-        result = self.invoke("--create", *self.path_args())
+        result = self.create(*self.path_args())
         self.assertIn("must be empty", result.stderr)
         self.assertEqual((results / "old.txt").read_text(), "keep me")
         self.assertEqual(self.calls(), [])
@@ -306,7 +446,9 @@ else:
         del config["guest_cli_versions"]
         validate_config(config)  # Existing static preparation profiles remain valid.
         versions = {"codex": "1.2.3", "claude_code": "4.5.6"}
-        self.assertEqual(bootstrap.commands("unused.yaml", versions)[2][-6:-4], ["1.2.3", "4.5.6"])
+        self.assertEqual(bootstrap.commands("unused.yaml", versions, self.profile)[2][-7:],
+                         ["1.2.3", "4.5.6", bootstrap.NODE_VERSION, self.profile["node_sha256"],
+                          self.profile["lima"], self.profile["image_sha256"], self.profile["arch"]])
 
     def test_guest_has_only_pinned_installs_and_version_probes(self):
         guest = (ROOT / "experiment/guest-setup.sh").read_text()
@@ -319,6 +461,9 @@ else:
         self.assertIn('claude_observed=$(claude --version)', guest)
         self.assertIn('[[ $codex_observed == "codex-cli $codex_version" ]]', guest)
         self.assertIn('[[ $claude_observed == "$claude_version (Claude Code)" ]]', guest)
+        self.assertIn('[[ $(uname -s) == Linux && $(uname -m) == "$guest_arch" ]]', guest)
+        self.assertIn("x86_64) node_arch=x64", guest)
+        self.assertIn("aarch64) node_arch=arm64", guest)
         for forbidden in (" login", "docker ", "make ", "npm test", "claude -p", "codex exec"):
             self.assertNotIn(forbidden, guest)
 
@@ -329,8 +474,9 @@ else:
         archive = self.base / "node.tar.gz"
         payload = b"synthetic runtime archive; never extracted or executed"
         checksum = hashlib.sha256(payload).hexdigest()
+        node_arch = "x64" if self.HOST[0] == "Linux" else "arm64"
         for expected in (checksum, "0" * 64):
-            with mock.patch.object(sys, "argv", ["-", bootstrap.NODE_VERSION, expected, str(archive)]), \
+            with mock.patch.object(sys, "argv", ["-", bootstrap.NODE_VERSION, expected, node_arch, str(archive)]), \
                     mock.patch.object(urllib.request, "urlopen", return_value=io.BytesIO(payload)) as download:
                 if expected == checksum:
                     exec(compile(blocks[0], "guest-download", "exec"), {})
@@ -340,9 +486,10 @@ else:
                         exec(compile(blocks[0], "guest-download", "exec"), {})
                 self.assertEqual(download.call_args.args[0],
                                  f"https://nodejs.org/download/release/v{bootstrap.NODE_VERSION}/"
-                                 f"node-v{bootstrap.NODE_VERSION}-linux-arm64.tar.gz")
+                                 f"node-v{bootstrap.NODE_VERSION}-linux-{node_arch}.tar.gz")
             archive.unlink()
-        args = ["-", bootstrap.LIMA_VERSION, bootstrap.IMAGE_SHA256,
+        args = ["-", self.profile["lima"], self.profile["image_sha256"],
+                self.profile["arch"], self.profile["node_sha256"],
                 bootstrap.NODE_VERSION, "v" + bootstrap.NODE_VERSION,
                 self.versions["codex"], "codex-cli " + self.versions["codex"],
                 self.versions["claude_code"], self.versions["claude_code"] + " (Claude Code)"]
@@ -354,11 +501,16 @@ else:
         with mock.patch.object(sys, "argv", args), \
                 mock.patch.dict(sys.modules, {"pathlib": SimpleNamespace(Path=guest_path)}):
             exec(compile(blocks[1], "guest-receipt", "exec"), {})
-            bootstrap.verify_receipt(self.paths[2], self.versions)
+            bootstrap.verify_receipt(self.paths[2], self.versions, self.profile)
             before = (self.paths[2] / "setup-receipt.txt").read_bytes()
             with self.assertRaisesRegex(SystemExit, "still be empty"):
                 exec(compile(blocks[1], "guest-receipt", "exec"), {})
             self.assertEqual((self.paths[2] / "setup-receipt.txt").read_bytes(), before)
+
+
+class MacOSBootstrapTests(BootstrapTests):
+    HOST = ("Darwin", "test-mac", "test-release", "test-version", "arm64")
+    CREATE_FLAGS = ("--allow-other-host",)
 
 
 if __name__ == "__main__":

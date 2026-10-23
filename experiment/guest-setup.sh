@@ -2,14 +2,23 @@
 # Sent on stdin to the fresh guest. Never execute this script on the host.
 set -euo pipefail
 umask 077
-[[ $# -eq 6 ]] || { printf 'ERROR: expected six pinned setup arguments\n' >&2; exit 2; }
+[[ $# -eq 7 ]] || { printf 'ERROR: expected seven pinned setup arguments\n' >&2; exit 2; }
 codex_version=$1
 claude_version=$2
 node_version=$3
 node_sha256=$4
 lima_version=$5
 image_sha256=$6
-[[ $(uname -s) == Linux && $(uname -m) == aarch64 ]] || exit 1
+guest_arch=$7
+case "$guest_arch" in
+    x86_64) node_arch=x64 ;;
+    aarch64) node_arch=arm64 ;;
+    *) printf 'ERROR: unsupported guest architecture\n' >&2; exit 1 ;;
+esac
+[[ $(uname -s) == Linux && $(uname -m) == "$guest_arch" ]] || {
+    printf 'ERROR: guest architecture does not match the host profile\n' >&2
+    exit 1
+}
 [[ -d /mnt/source && -d /mnt/references && -d /mnt/results ]] || exit 1
 
 # Use only guest-local scratch, never a source/reference working directory.
@@ -22,12 +31,12 @@ export DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 
 # Ubuntu cloud images supply Python, CA certificates, tar, and gzip. Install a
 # checksummed Node binary; no apt upgrade, source build, or unpinned installer.
-python3 - "$node_version" "$node_sha256" "$guest_work/node.tar.gz" <<'PY'
+python3 - "$node_version" "$node_sha256" "$node_arch" "$guest_work/node.tar.gz" <<'PY'
 import hashlib
 import sys
 import urllib.request
-version, expected, target = sys.argv[1:]
-url = f"https://nodejs.org/download/release/v{version}/node-v{version}-linux-arm64.tar.gz"
+version, expected, arch, target = sys.argv[1:]
+url = f"https://nodejs.org/download/release/v{version}/node-v{version}-linux-{arch}.tar.gz"
 digest = hashlib.sha256()
 with urllib.request.urlopen(url, timeout=60) as response, open(target, "xb") as stream:
     while chunk := response.read(1024 * 1024):
@@ -73,12 +82,12 @@ claude_observed=$(claude --version)
 # Publish the only result after all installations and version checks succeed.
 # Exclusive creation prevents overwriting existing results; host cleanup removes
 # an incomplete receipt on any subsequent failure, including lost transport.
-python3 - "$lima_version" "$image_sha256" "$node_version" "$node_observed" \
+python3 - "$lima_version" "$image_sha256" "$guest_arch" "$node_sha256" "$node_version" "$node_observed" \
     "$codex_version" "$codex_observed" "$claude_version" "$claude_observed" <<'PY'
 from pathlib import Path
 import os
 import sys
-keys = ("lima", "ubuntu_sha256", "node_expected", "node_observed", "codex_expected",
+keys = ("lima", "ubuntu_sha256", "guest_arch", "node_sha256", "node_expected", "node_observed", "codex_expected",
         "codex_observed", "claude_code_expected", "claude_code_observed")
 values = {"status": "ready", "vm": "sonic-static-audit", **dict(zip(keys, sys.argv[1:])),
           "authentication": "not-run", "static_only": "true"}

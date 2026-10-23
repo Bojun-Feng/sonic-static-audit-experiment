@@ -15,14 +15,34 @@ from common import AuditError, read_json, require, validate_config
 
 EXPERIMENT = Path(__file__).resolve().parents[1]
 ROOT = EXPERIMENT.parent
-LIMA_VERSION = "2.2.1"
 VM_NAME = "sonic-static-audit"
-IMAGE = "https://cloud-images.ubuntu.com/releases/noble/release-20261017/ubuntu-24.04-server-cloudimg-arm64.img"
-IMAGE_SHA256 = "50e24e1fb79e89116e939d90aa7738f7af48c442fa1bc2510131e0b39c50348e"
+IMAGE_BASE = "https://cloud-images.ubuntu.com/releases/noble/release-20261017"
 NODE_VERSION = "22.14.0"
-NODE_SHA256 = "8cf30ff7250f9463b53c18f89c6c606dfda70378215b2c905d0a9a8b08bd45e0"
 PLACEHOLDERS = ("/absolute/path/to/sonic-swss", "/absolute/path/to/reference-materials",
                 "/absolute/path/to/audit-results")
+
+
+def host_profile():
+    # os.uname reads the same kernel fields as uname -s/-m, without executing tools.
+    host = os.uname()
+    if (host.sysname, host.machine) == ("Linux", "x86_64"):
+        return {
+            "host": "Linux/x86_64", "lima": "2.0.3", "vm_type": "qemu", "arch": "x86_64",
+            "cpus": 8, "memory": "32GiB", "disk": "200GiB", "mount_type": "9p",
+            "image": f"{IMAGE_BASE}/ubuntu-24.04-server-cloudimg-amd64.img",
+            "image_sha256": "04e8f2461a16a44e78a370284471f29616cdd9baf1893df25807b71f985b6c94",
+            "node_sha256": "9d942932535988091034dc94cc5f42b6dc8784d6366df3a36c4c9ccb3996f0c2",
+        }
+    if (host.sysname, host.machine) == ("Darwin", "arm64"):
+        return {
+            "host": "Darwin/arm64", "lima": "2.2.1", "vm_type": "vz", "arch": "aarch64",
+            "cpus": 4, "memory": "8GiB", "disk": "40GiB", "mount_type": "virtiofs",
+            "image": f"{IMAGE_BASE}/ubuntu-24.04-server-cloudimg-arm64.img",
+            "image_sha256": "50e24e1fb79e89116e939d90aa7738f7af48c442fa1bc2510131e0b39c50348e",
+            "node_sha256": "8cf30ff7250f9463b53c18f89c6c606dfda70378215b2c905d0a9a8b08bd45e0",
+        }
+    raise AuditError(f"unsupported host {host.sysname}/{host.machine}; "
+                     "require Linux/x86_64 or Darwin/arm64")
 
 
 def mount_paths(values):
@@ -57,24 +77,24 @@ def mount_paths(values):
     return tuple(paths)
 
 
-def render_config(paths):
+def render_config(paths, profile):
     # JSON strings are valid YAML scalars; user paths are never shell/YAML code.
     source, reference, results = (json.dumps(str(p), ensure_ascii=True) for p in paths)
-    return f"""minimumLimaVersion: "{LIMA_VERSION}"
-vmType: vz
-arch: aarch64
-cpus: 4
-memory: 8GiB
-disk: 40GiB
+    return f"""minimumLimaVersion: "{profile['lima']}"
+vmType: {profile['vm_type']}
+arch: {profile['arch']}
+cpus: {profile['cpus']}
+memory: {profile['memory']}
+disk: {profile['disk']}
 images:
-  - location: "{IMAGE}"
-    arch: aarch64
-    digest: "sha256:{IMAGE_SHA256}"
+  - location: "{profile['image']}"
+    arch: {profile['arch']}
+    digest: "sha256:{profile['image_sha256']}"
 user:
   name: audit
   home: /home/audit
   shell: /bin/bash
-mountType: virtiofs
+mountType: {profile['mount_type']}
 mounts:
   - location: {source}
     mountPoint: /mnt/source
@@ -103,13 +123,13 @@ portForwards:
 """
 
 
-def commands(config_path, versions):
+def commands(config_path, versions, profile):
     return [
         ["limactl", "create", "--tty=false", f"--name={VM_NAME}", str(config_path)],
         ["limactl", "start", "--tty=false", VM_NAME],
         ["limactl", "shell", "--workdir=/", VM_NAME, "/bin/bash", "--noprofile", "--norc",
          "-s", "--", versions["codex"], versions["claude_code"], NODE_VERSION,
-         NODE_SHA256, LIMA_VERSION, IMAGE_SHA256],
+         profile["node_sha256"], profile["lima"], profile["image_sha256"], profile["arch"]],
     ]
 
 
@@ -119,20 +139,26 @@ def authentication_commands():
     print(f"limactl shell --workdir=/home/audit {VM_NAME} claude auth login")
 
 
-def print_plan(paths, versions, guest_script):
+def print_plan(paths, versions, guest_script, profile, allow_other_host):
     print("DRY RUN: no commands executed, downloads, files, or VM state changed.")
+    print(f"Host profile: {profile['host']} (uname -s/-m).")
+    print("Host: --create requires short hostname 'u' (uname -n); "
+          "--allow-other-host explicitly overrides this rule.")
+    print(f"Host: other-host override {'enabled' if allow_other_host else 'disabled'}.")
     print("Host: validate absolute existing, disjoint mount directories; results must be empty.")
     print("Host: pass only PATH, HOME, USER, LOGNAME, TMPDIR, LIMA_HOME, and LC_ALL=C to Lima.")
-    print(f"Host: require `limactl --version` == 'limactl version {LIMA_VERSION}'.")
+    print(f"Host: require `limactl --version` == 'limactl version {profile['lima']}'.")
+    if profile["vm_type"] == "qemu":
+        print("Host: require qemu-system-x86_64 and qemu-img on PATH, outside all mounts.")
     print("Host: reject Lima _config/default.yaml and override.yaml (no inherited configuration).")
     print("Host: require Lima state and temporary scratch outside all mounts.")
     print(f"Host: limactl list --quiet; refuse existing {VM_NAME} (including stopped VMs).")
     print("Host: create a private mode-0700 temporary directory under the system temp directory/TMPDIR.")
     print("Host: write mode-0600 <scratch>/audit.yaml with exactly this content:")
     print("--- BEGIN LIMA YAML ---")
-    print(render_config(paths), end="")
+    print(render_config(paths, profile), end="")
     print("--- END LIMA YAML ---")
-    for command in commands("<scratch>/audit.yaml", versions):
+    for command in commands("<scratch>/audit.yaml", versions, profile):
         print("Host: " + shlex.join(command))
     print("Guest: the shell command receives exactly this script on stdin:")
     print("--- BEGIN GUEST SCRIPT ---")
@@ -146,10 +172,11 @@ def print_plan(paths, versions, guest_script):
     authentication_commands()
 
 
-def expected_receipt(versions):
+def expected_receipt(versions, profile):
     return {
-        "status": "ready", "lima": LIMA_VERSION, "vm": VM_NAME,
-        "ubuntu_sha256": IMAGE_SHA256,
+        "status": "ready", "lima": profile["lima"], "vm": VM_NAME,
+        "ubuntu_sha256": profile["image_sha256"], "guest_arch": profile["arch"],
+        "node_sha256": profile["node_sha256"],
         "node_expected": NODE_VERSION, "node_observed": f"v{NODE_VERSION}",
         "codex_expected": versions["codex"], "codex_observed": f"codex-cli {versions['codex']}",
         "claude_code_expected": versions["claude_code"],
@@ -158,7 +185,7 @@ def expected_receipt(versions):
     }
 
 
-def verify_receipt(results, versions):
+def verify_receipt(results, versions, profile):
     receipt = results / "setup-receipt.txt"
     require(set(results.iterdir()) == {receipt}, "results must contain only setup-receipt.txt")
     require(not receipt.is_symlink() and receipt.is_file() and receipt.stat().st_size < 4096,
@@ -166,18 +193,20 @@ def verify_receipt(results, versions):
     lines = receipt.read_text(encoding="utf-8").splitlines()
     pairs = [line.split("=", 1) for line in lines]
     require(all(len(pair) == 2 for pair in pairs), "invalid setup receipt")
-    require(len(pairs) == len(dict(pairs)) and dict(pairs) == expected_receipt(versions),
+    require(len(pairs) == len(dict(pairs)) and dict(pairs) == expected_receipt(versions, profile),
             "setup receipt does not match pinned/observed versions")
 
 
-def create_vm(paths, versions, guest_script):
+def create_vm(paths, versions, guest_script, profile, allow_other_host=False):
+    require(allow_other_host or os.uname().nodename.split(".", 1)[0] == "u",
+            "VM creation is restricted to host 'u'; run there or explicitly use --allow-other-host")
     # Do not pass provider tokens, SSH_AUTH_SOCK, shell startup overrides, or
     # host proxy credentials to Lima. Do not inspect any credential files.
     env = {key: os.environ[key] for key in ("PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LIMA_HOME")
            if key in os.environ}
     env["LC_ALL"] = "C"
     lima = shutil.which("limactl", path=env.get("PATH", os.defpath))
-    require(lima is not None, f"pinned Lima {LIMA_VERSION} is unavailable; install it manually")
+    require(lima is not None, f"pinned Lima {profile['lima']} is unavailable; install it manually")
     lima = str(Path(lima).resolve())
 
     def run(args, **kwargs):
@@ -190,9 +219,15 @@ def create_vm(paths, versions, guest_script):
             "Lima state must be outside and disjoint from all mounts")
     require(not any(Path(lima).is_relative_to(p) for p in paths),
             "limactl must not be an executable from a mounted input/results directory")
+    if profile["vm_type"] == "qemu":
+        for name in ("qemu-system-x86_64", "qemu-img"):
+            binary = shutil.which(name, path=env.get("PATH", os.defpath))
+            require(binary is not None, f"QEMU prerequisite {name} is unavailable; install it manually")
+            require(not any(Path(binary).resolve().is_relative_to(p) for p in paths),
+                    f"{name} must not be an executable from a mounted input/results directory")
     observed = run(["--version"], stdout=subprocess.PIPE).stdout.strip()
-    require(observed == f"limactl version {LIMA_VERSION}",
-            f"Lima version mismatch: require {LIMA_VERSION}, got {observed}")
+    require(observed == f"limactl version {profile['lima']}",
+            f"Lima version mismatch: require {profile['lima']}, got {observed}")
     for name in ("default.yaml", "override.yaml"):
         path = lima_home / "_config" / name
         require(not path.exists() and not path.is_symlink(),
@@ -221,13 +256,13 @@ def create_vm(paths, versions, guest_script):
             config_path = scratch / "audit.yaml"
             with config_path.open("x", encoding="utf-8") as stream:
                 os.chmod(config_path, 0o600)
-                stream.write(render_config(paths))
-            create, start, setup = commands(config_path, versions)
+                stream.write(render_config(paths, profile))
+            create, start, setup = commands(config_path, versions, profile)
             attempted = True  # Failed create can already have allocated VM state.
             run(create[1:])
             run(start[1:])
             run(setup[1:], input=guest_script)
-            verify_receipt(results, versions)
+            verify_receipt(results, versions, profile)
         print(f"Created {VM_NAME}; verified {results / 'setup-receipt.txt'}.")
         authentication_commands()
     except BaseException:
@@ -256,6 +291,8 @@ def main(argv=None):
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true", help="print the complete plan without mutation")
     mode.add_argument("--create", action="store_true", help="create a fresh VM and install pinned guest CLIs")
+    parser.add_argument("--allow-other-host", action="store_true",
+                        help="explicitly permit creation away from host u (supported hosts only)")
     for name in ("source", "reference", "results"):
         parser.add_argument(f"--{name}", help="absolute existing directory (required for --create)")
     args = parser.parse_args(argv)
@@ -263,15 +300,16 @@ def main(argv=None):
     if any(values) and not all(values) or args.create and not all(values):
         parser.error("--source, --reference, and --results must all be supplied")
     try:
+        profile = host_profile()
         config = validate_config(read_json(EXPERIMENT / "config.json"))
         require("guest_cli_versions" in config, "config.json requires guest_cli_versions")
         versions = config["guest_cli_versions"]
         paths = mount_paths(values) if all(values) else tuple(map(Path, PLACEHOLDERS))
         guest_script = (EXPERIMENT / "guest-setup.sh").read_text(encoding="utf-8")
         if args.dry_run:
-            print_plan(paths, versions, guest_script)
+            print_plan(paths, versions, guest_script, profile, args.allow_other_host)
         else:
-            create_vm(paths, versions, guest_script)
+            create_vm(paths, versions, guest_script, profile, args.allow_other_host)
     except (AuditError, OSError, ValueError, subprocess.CalledProcessError, KeyboardInterrupt) as exc:
         print(f"ERROR: {exc or 'bootstrap interrupted'}", file=sys.stderr)
         return 1
