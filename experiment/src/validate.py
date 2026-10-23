@@ -16,7 +16,10 @@ def load_selection(out, repo=None):
     out = out.resolve()
     manifest = read_json(out / "manifest.json")
     index = read_json(out / "selected-groups.json")
-    keys(manifest, ["schema_version", "mode", "source_root", "source_commit", "profile", "files"], "manifest")
+    fields = ["schema_version", "mode", "source_root", "source_commit", "profile", "files"]
+    if isinstance(manifest, dict) and "source_identity" in manifest:
+        fields.append("source_identity")
+    keys(manifest, fields, "manifest")
     keys(index, ["schema_version", "manifest_sha256", "scanner", "groups"], "selected-groups")
     require(type(manifest["schema_version"]) is int and manifest["schema_version"] == 1
             and type(index["schema_version"]) is int and index["schema_version"] == 1,
@@ -27,7 +30,19 @@ def load_selection(out, repo=None):
     repo, out = source_and_output(repo or Path(manifest["source_root"]), out)
     require(str(repo) == manifest["source_root"], "--repo disagrees with manifest source_root")
     config = validate_config(manifest["profile"])
-    require(manifest["source_commit"] == source_commit(repo), "source commit changed")
+    if "source_identity" in manifest:
+        from source_identity import verify
+        identity = manifest["source_identity"]
+        keys(identity, ["path", "sha256"], "manifest source identity")
+        require(isinstance(identity["path"], str) and Path(identity["path"]).is_absolute(),
+                "source identity path must be absolute")
+        path = Path(identity["path"])
+        verified = verify(repo, path, config["intended_source_commit"])
+        require(identity["sha256"] == sha256(path.read_bytes()), "source identity bytes changed")
+        commit = verified["source_commit"]
+    else:
+        commit = source_commit(repo)
+    require(manifest["source_commit"] == commit, "source commit changed")
     require(config["intended_source_commit"] in ("UNPINNED", manifest["source_commit"]),
             "source commit does not match intended_source_commit")
     require(index["manifest_sha256"] == sha256((out / "manifest.json").read_bytes()),

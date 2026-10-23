@@ -76,15 +76,21 @@ def ast_matches(data, patterns, binary, config_path):
     return sorted_matches(matches)
 
 
-def select(repo, config_path, out, mode="targeted"):
+def select(repo, config_path, out, mode="targeted", identity=None):
     repo, out = source_and_output(repo, out)
     config = validate_config(read_json(config_path))
-    commit = source_commit(repo)
+    if identity is not None:
+        from source_identity import verify
+        commit = verify(repo, identity, config["intended_source_commit"])["source_commit"]
+    else:
+        commit = source_commit(repo)
     require(config["intended_source_commit"] in ("UNPINNED", commit),
             "source commit does not match intended_source_commit")
     entries, contents = collect_sources(repo, config)
     manifest = {"schema_version": 1, "mode": mode, "source_root": str(repo),
                 "source_commit": commit, "profile": config, "files": entries}
+    if identity is not None:
+        manifest["source_identity"] = {"path": str(identity.resolve()), "sha256": sha256(identity.read_bytes())}
     out.mkdir(parents=True, exist_ok=True)
     groups = []
     scanner = {"name": "not-run", "version": "none"}
@@ -132,9 +138,10 @@ def main():
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--mode", choices=("exhaustive", "targeted"), default="targeted")
+    parser.add_argument("--identity", type=Path)
     args = parser.parse_args()
     try:
-        select(args.repo, args.config, args.out, args.mode)
+        select(args.repo, args.config, args.out, args.mode, args.identity)
     except (AuditError, OSError, UnicodeError, subprocess.SubprocessError) as exc:
         print(f"FAIL selection: {exc}", file=sys.stderr)
         return 1

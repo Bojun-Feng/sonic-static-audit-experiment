@@ -1,9 +1,9 @@
 # Static source audit experiment
 
-A local preparation wrapper with a SONiC SWSS routing/interface profile. It
+A static audit preparation and model runner with a SONiC SWSS routing/interface profile. It
 compares an **exhaustive** queue of relevant production files with a **targeted**
-queue of prefix/partial-match and structured-key candidates. The baseline
-generates and validates artifacts; it performs no model discovery or bug triage.
+queue of prefix/partial-match and structured-key candidates. Preparation generates and validates artifacts. The explicit `run` command performs
+model discovery and independent candidate verification.
 
 Requirements: Python 3.10+ (standard library only), Bash, and an existing source
 checkout. `ast-grep` is optional. Preparation performs no installation. The separate
@@ -36,6 +36,62 @@ python3 -B experiment/src/validate.py --out ./results/manual
 Selection defaults to targeted mode. `--mode exhaustive` writes the exhaustive
 manifest and an explicit empty, `not-run` targeted index; it does not invoke a
 matcher or require cards. The runner passes the expected mode to validation.
+
+## Run a prepared queue
+
+With the configured standalone `codex` and `claude` CLIs already installed and
+authenticated, run either prepared mode:
+
+```sh
+./experiment/run-experiment.sh run exhaustive --reference /path/to/references
+./experiment/run-experiment.sh run targeted --reference /path/to/references
+```
+
+`--prepared DIR` defaults to `results/MODE`; `--out DIR` defaults to
+`results/MODE-run`. These directories, the source, and reference inputs must be
+disjoint. Run invokes provider CLIs; preparation and the local tests do not.
+Source and reference inputs should be mounted read-only. The discovery sandbox
+is read-only; verifier tools are limited to Read/Grep/Glob. Prompts prohibit
+source execution, tests, builds, network tools, and source edits.
+
+Each review unit gets fresh sessions for both models in `runner-config.json`.
+Kernel file locks enforce four discovery sessions and one verifier session
+across runner processes for the Unix user, independent of mode or output path.
+A failed or incomplete session retries in a fresh working directory. Only a
+validated final success is atomically moved to `results/discovery/TASK` or
+`results/verifier/CANDIDATE`, with trace, result, prompt, native usage metadata,
+and a completion record. Temporary failed traces are removed.
+
+Actual findings produce `results/candidates/ID/candidate.json` and `report.md`;
+clean units produce no Markdown report. Findings with the same source range and
+normalized root cause are combined, retaining every discovery occurrence.
+The serial verifier receives all occurrence traces and prior verdicts for
+semantic duplicate checks. Verdicts are confirmed, rejected, duplicate, or
+needs-validation. A verdict is not runtime reproduction evidence.
+
+`status.json` records queued/running/succeeded/failed counts for both lanes.
+Terminal failures append to `notifications.jsonl`; healthy tasks continue and
+the run exits nonzero. Rerunning the same output verifies and skips completed
+artifacts and preserves terminal failures without duplicate notifications.
+Use a new output directory to retry terminal failures or change run inputs.
+Only one runner may own an output directory at a time.
+
+For a six-unit local pilot queue using the identical production runner:
+
+```sh
+python3 -B experiment/src/audit_queue.py --prepared results/exhaustive --mode exhaustive --out results/exhaustive-queue.json
+./experiment/run-experiment.sh run exhaustive --reference /path/to/references --queue results/exhaustive-queue.json
+```
+
+Repeat with `targeted` for six groups. Each queue schedules twelve discovery
+sessions. Supply six `--path` arguments to choose explicit paths instead of the
+first six available units. No VM operations are performed by the runner.
+
+For an archive without Git metadata, `source_identity.py --repo DIR --commit SHA --out FILE` creates an
+immutable identity file attesting the snapshot bytes and the supplied known
+source commit. Pass that file as `prepare ... --identity FILE`; subsequent
+validation checks both the identity and snapshot bytes. The identity is an
+operator attestation, not independent proof of an archive's origin.
 
 ## Selection and provenance
 
