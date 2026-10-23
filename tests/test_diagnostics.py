@@ -51,6 +51,14 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(command[:2], ['/usr/bin/bwrap', '--die-with-parent'])
         self.assertIn('--unshare-user', command)
         self.assertIn('--unshare-pid', command)
+        # A plain bind of / carries nodev, so the CLI's TTY-backed shell tool
+        # cannot open /dev/null or allocate a PTY. Give the worker bubblewrap's
+        # minimal private /dev right after the root bind; never the host's
+        # full device tree.
+        bind = command.index('--bind')
+        self.assertEqual(command[bind:bind + 5], ['--bind', '/', '/', '--dev', '/dev'])
+        self.assertNotIn('--dev-bind', command)
+        self.assertLess(command.index('--dev'), command.index('--tmpfs'))
         self.assertEqual(command[command.index('--tmpfs') + 1], str(root))
         self.assertEqual(command[command.index('--remount-ro') + 1], str(root))
         self.assertEqual(command[command.index('--proc') + 1], '/proc')
@@ -104,6 +112,51 @@ class DiagnosticsTests(unittest.TestCase):
                 with self.assertRaises(AttemptError):
                     verified_worker_prefix(root)
             self.assertEqual(list(root.iterdir()), [])
+
+    def shim_prefix(self, directory, patches):
+        """A stand-in isolation prefix: runs the real probe in-process after
+        patching os primitives, so device failures can be simulated offline."""
+        shim = Path(directory) / 'shim.py'
+        shim.write_text('import os, sys\n'
+                        'sentinel = sys.argv[-1]\n'
+                        'real_open = os.open\n'
+                        'def masked_open(path, flags, *args, **kwargs):\n'
+                        '    if os.fspath(path) == sentinel or os.fspath(path) in DENIED:\n'
+                        '        raise PermissionError(13, "denied by test shim")\n'
+                        '    return real_open(path, flags, *args, **kwargs)\n'
+                        'def no_pty():\n'
+                        '    raise PermissionError(13, "pty denied by test shim")\n'
+                        + patches +
+                        'os.open = masked_open\n'
+                        'argv = sys.argv[1:]\n'
+                        'assert argv[1:3] == ["-I", "-c"], argv\n'
+                        'sys.argv = ["-c", *argv[4:]]\n'
+                        'exec(compile(argv[3], "probe", "exec"), {"__name__": "__main__"})\n')
+        return [sys.executable, '-I', str(shim)]
+
+    def test_probe_requires_usable_device_nodes_and_pty_inside_the_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'diagnostics'
+            root.mkdir(mode=0o700)
+            # Masked canary with working devices: the probe passes and returns the prefix.
+            prefix = self.shim_prefix(directory, 'DENIED = set()\n')
+            with mock.patch('diagnostics.isolation_prefix', return_value=prefix):
+                self.assertEqual(verified_worker_prefix(root), prefix)
+            self.assertEqual(list(root.iterdir()), [])
+            # The same masked canary, but no PTY or no /dev/null: readiness must fail
+            # before any provider call, privately naming the unusable device.
+            for patches, marker in (('DENIED = set()\nos.openpty = no_pty\n', 'pty'),
+                                    ('DENIED = {"/dev/null"}\n', '/dev/null')):
+                prefix = self.shim_prefix(directory, patches)
+                with mock.patch('diagnostics.isolation_prefix', return_value=prefix):
+                    with self.assertRaises(AttemptError) as caught:
+                        verified_worker_prefix(root)
+                self.assertEqual(caught.exception.summary(),
+                                 {'category': 'configuration', 'stage': 'worker_isolation',
+                                  'reason': 'isolation_unavailable', 'retryable': False})
+                self.assertIn(marker, str(caught.exception))
+                self.assertNotIn(marker, str(caught.exception.summary()))
+                self.assertEqual(list(root.iterdir()), [])
 
 
 if __name__ == '__main__':

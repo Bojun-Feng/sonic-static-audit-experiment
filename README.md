@@ -120,10 +120,16 @@ The runner enforces the diagnostic boundary for both model lanes. Linux requires
 **bubblewrap (`bwrap`) and usable user/PID namespaces on the runner host**;
 these are operator prerequisites, separate from the pinned model CLI bootstrap.
 It masks diagnostics with an empty read-only mount and hides parent process
-filesystem handles with a private PID namespace. macOS uses `sandbox-exec` to
-deny diagnostic reads/writes and access to other processes. A local canary probe
-runs before any model invocation; unavailable isolation fails without calling a
-provider. Permissions or prompt instructions alone are not the worker boundary.
+filesystem handles with a private PID namespace. The Linux worker also gets
+bubblewrap's minimal private `/dev` (null, zero, full, random, urandom, tty,
+ptmx with a fresh devpts, shm, and fd links) rather than the host device tree:
+a plain bind of `/` carries `nodev`, which left every device node unusable, so
+the Codex TTY-backed shell tool could not start a single inspection command.
+macOS uses `sandbox-exec` to deny diagnostic reads/writes and access to other
+processes. A local canary probe runs before any model invocation; it checks that
+the private root is unreadable and that `/dev/null` and PTY allocation work
+inside the boundary, so unavailable or unusable isolation fails without calling
+a provider. Permissions or prompt instructions alone are not the worker boundary.
 The source and reference mounts remain read-only as before.
 
 Discovery acceptance requires successful native `command_execution` events before

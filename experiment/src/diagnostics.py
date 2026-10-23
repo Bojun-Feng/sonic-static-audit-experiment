@@ -41,8 +41,14 @@ def isolation_prefix(root):
                                'bubblewrap is required on the runner host')
         # A private PID namespace also closes /proc/<parent>/root and fd routes
         # to hidden diagnostics. No capabilities survive in the worker.
+        # A plain bind of / carries nodev, which leaves every device node
+        # unusable: the CLI's TTY-backed shell tool then cannot open /dev/null
+        # or allocate a PTY and no inspection command ever starts. bubblewrap's
+        # minimal private /dev (null, zero, full, random, urandom, tty, ptmx
+        # with a fresh devpts, shm, fd links) restores that without exposing
+        # the host's device tree; the masked diagnostics root is unaffected.
         return [binary, '--die-with-parent', '--unshare-user', '--unshare-pid', '--unshare-ipc',
-                '--bind', '/', '/', '--tmpfs', str(root), '--remount-ro', str(root),
+                '--bind', '/', '/', '--dev', '/dev', '--tmpfs', str(root), '--remount-ro', str(root),
                 '--proc', '/proc', '--cap-drop', 'ALL', '--']
     if sys.platform == 'darwin':
         profile = ('(version 1) (allow default) '
@@ -62,14 +68,33 @@ def verified_worker_prefix(root, protected=()):
     with tempfile.TemporaryDirectory(prefix='isolation-probe-', dir=root) as directory:
         sentinel = Path(directory) / 'private.txt'
         sentinel.write_text('private diagnostic isolation probe')
+        # Prove both halves of the boundary before any provider call: the
+        # private root is unreadable, and the worker still has the ordinary
+        # device nodes and PTY allocation that the CLI shell tool needs.
         probe = '''import os, sys
+problems = []
 try:
     fd = os.open(sys.argv[1], os.O_RDONLY)
 except (PermissionError, FileNotFoundError):
-    sys.exit(0)
+    pass
 else:
     os.close(fd)
-    sys.exit(9)
+    problems.append('private diagnostics are readable inside the worker boundary')
+try:
+    fd = os.open('/dev/null', os.O_RDWR)
+    os.write(fd, b'probe')
+    os.close(fd)
+except OSError as exc:
+    problems.append(f'/dev/null is unusable inside the worker boundary: {exc}')
+try:
+    master, worker = os.openpty()
+    os.close(master)
+    os.close(worker)
+except OSError as exc:
+    problems.append(f'pty allocation failed inside the worker boundary: {exc}')
+if problems:
+    print('; '.join(problems), file=sys.stderr)
+    sys.exit(9 if problems[0].startswith('private') else 7)
 '''
         try:
             result = subprocess.run([*prefix, sys.executable, '-I', '-c', probe, str(sentinel)],
