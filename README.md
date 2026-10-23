@@ -62,6 +62,36 @@ validated final success is atomically moved to `results/discovery/TASK` or
 `results/verifier/CANDIDATE`, with trace, result, prompt, native usage metadata,
 and a completion record. Temporary failed traces are removed.
 
+Discovery acceptance requires source inspection in the native Codex JSONL trace,
+even for an empty candidate list. Before the final answer, the session must retain
+two distinct successful `item.completed` / `command_execution` records (nonempty
+IDs, `status: completed`, integer `exit_code: 0`, and source output):
+
+- `cat -- ABSOLUTE_ASSIGNED_FILE`: output must equal the entire assigned file.
+- `rg -n -F -- IDENTIFIER ABSOLUTE_SOURCE_ROOT`: a literal context search for an
+  identifier from the assigned file (at least three characters, excluding common
+  language keywords). Each retained match must name an existing file inside the
+  source root, with its actual line number and matching text. At least one match
+  must be C/C++ source or a header; documentation matches alone do not qualify.
+
+These exact command forms are the executable evidence contract; paths and the
+identifier may be shell-quoted, and the native CLI may wrap a command in
+`sh`, `bash`, or `zsh` with `-c` or `-lc`. Pipelines, redirections, combined
+commands, directory listings, source cards, prose claims, failed reads, and
+truncated output do not substitute for these records. Additional read-only
+inspection is encouraged. Choose a meaningful symbol to explore callers,
+definitions, or guards; when no external references exist, search hits in the
+assigned file and its full read supply local context. This gate proves recorded
+source access and a source-backed context search, not semantic review quality or
+complete caller coverage. The runner never executes commands from saved traces.
+
+Resume checks the native trace again after verifying artifact hashes; a valid
+completion record alone cannot authorize passive results. Historical traces
+containing only thread/turn events and final answers are incomplete review
+evidence, including the reported 262-session targeted run. They must not be
+counted as reviewed units or clean findings. Use a new output directory for a
+fresh run with the revised prompt; existing run bindings reject prompt changes.
+
 Actual findings produce `results/candidates/ID/candidate.json` and `report.md`;
 clean units produce no Markdown report. Findings with the same source range and
 normalized root cause are combined, retaining every discovery occurrence.

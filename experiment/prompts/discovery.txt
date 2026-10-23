@@ -15,6 +15,28 @@ relevant source context. Focus on routing/interface correctness, prefix versus
 exact matching, structured-key parsing, and concrete consequential defects.
 The selector's matches are review hints, not findings.
 
+Required source-inspection evidence, before any conclusion (including no
+candidates): run these two separate read-only commands using the native command
+tool. Use absolute paths and shell-quote each path/identifier as needed:
+
+    cat -- <source_root/task.path>
+    rg -n -F -- <identifier> <source_root>
+
+The first command must display the entire assigned source file without output
+truncation. Increase the tool's output limit as needed. For the second command,
+choose a meaningful function, type, member, or key identifier from that file
+(at least three characters, not a language keyword) to inspect relevant callers,
+definitions, or guards across source. Preserve nonempty source matches with
+filenames and line numbers. Inspect further context as needed. The search may
+find only the assigned file when there are no external references; inspect its
+local context in that case. Commands must complete successfully and retain their
+source output in the native session trace before the final JSON answer. A source
+card, listing, claimed read, failed command, or final answer alone is insufficient.
+Use the exact command forms above for these two evidence records; do not combine
+them with pipelines, redirections, cd, or other shell commands. Additional
+read-only inspection is allowed. If the evidence cannot be obtained, do not
+claim a completed review.
+
 Return only the JSON object required by the schema. Raise candidates only when
 you can identify a concrete defect, a reachable triggering scenario, and source
 evidence. Each candidate needs its relative source path, narrow inclusive line

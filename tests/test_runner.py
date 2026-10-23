@@ -174,6 +174,49 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(before, self.events())
         self.assertEqual(list((out / "work").iterdir()), [])
 
+    def test_passive_trace_is_rejected_even_with_valid_candidates(self):
+        for mode in ("exhaustive", "targeted"):
+            self.scenario({"codex": {"src/route0.cpp": {
+                "always": "passive", "candidates": [finding("src/route0.cpp")]}}})
+            self.assertEqual(self.run_audit(mode), 1)
+            out = self.base / (mode + "-run")
+            self.assertEqual(read_json(out / "status.json")["discovery"]["failed"], 2)
+            self.assertFalse(list((out / "results/candidates").iterdir()))
+            for trace in (out / "results/discovery").glob("*/trace.jsonl"):
+                records = [json.loads(line) for line in trace.read_text().splitlines()]
+                commands = [e["item"] for e in records if e.get("item", {}).get("type") == "command_execution"]
+                self.assertGreaterEqual(len(commands), 2)
+                self.assertTrue(all(c["status"] == "completed" and c["aggregated_output"] for c in commands))
+
+    def test_passive_clean_trace_retries_then_accepts_inspected_attempt(self):
+        self.scenario({"codex": {"src/route0.cpp": {"first": "passive"},
+                                  "src/route1.cpp": {"always": "passive"}}})
+        self.assertEqual(self.run_audit(), 1)
+        out = self.base / "exhaustive-run"
+        self.assertEqual(read_json(out / "status.json")["discovery"]["failed"], 2)
+        for completion in (out / "results/discovery").glob("*/completion.json"):
+            value = read_json(completion)
+            if value["task"]["path"] == "src/route0.cpp":
+                self.assertEqual(read_json(completion.parent / "metadata.json")["attempt"], 2)
+        self.assertEqual(list((out / "work").iterdir()), [])
+        before = self.events()
+        self.assertEqual(self.run_audit(), 1)
+        self.assertEqual(before, self.events())
+
+    def test_resume_revalidates_native_inspection_even_with_matching_hashes(self):
+        from common import sha256
+        self.assertEqual(self.run_audit(), 0)
+        trace = next((self.base / "exhaustive-run/results/discovery").glob("*/trace.jsonl"))
+        records = [json.loads(line) for line in trace.read_text().splitlines()]
+        trace.write_text("".join(json.dumps(e) + "\n" for e in records
+                                 if e.get("item", {}).get("type") != "command_execution"))
+        completion = trace.parent / "completion.json"
+        value = read_json(completion)
+        value["artifacts"]["trace.jsonl"] = sha256(trace.read_bytes())
+        completion.write_bytes(json_bytes(value))
+        with self.assertRaises(AuditError):
+            self.run_audit()
+
     def test_terminal_failure_notifies_and_healthy_tasks_finish(self):
         self.scenario({"codex": {"gpt-6-astra:src/route0.cpp": {"always": "exit"}}})
         self.assertEqual(self.run_audit(), 1)

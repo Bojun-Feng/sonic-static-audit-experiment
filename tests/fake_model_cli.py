@@ -3,6 +3,8 @@
 import fcntl
 import json
 import os
+import shlex
+import subprocess
 from pathlib import Path
 import sys
 import time
@@ -82,6 +84,20 @@ if kind == "codex":
     answer = {"candidates": behavior.get("candidates", [])}
     emit({"type": "thread.started", "thread_id": session})
     emit({"type": "turn.started"})
+    if failure != "passive":
+        # Execute real read-only host commands against disposable source fixtures.
+        # grep -F is the portable local stand-in for rg's literal line search;
+        # retained events use the production contract's rg command form.
+        root = Path(context["source_root"])
+        commands = [(["cat", "--", str(root / path)], None),
+                    (["rg", "-n", "-F", "--", "key", str(root)],
+                     ["grep", "-r", "-n", "-F", "--", "key", str(root)])]
+        for number, (argv, local) in enumerate(commands):
+            result = subprocess.run(local or argv, capture_output=True, text=True, check=True)
+            emit({"type": "item.completed", "item": {"id": f"inspection-{number}",
+                  "type": "command_execution", "command": shlex.join(argv),
+                  "status": "completed", "exit_code": result.returncode,
+                  "aggregated_output": result.stdout}})
     if failure == "partial":
         emit({"type": "item.started", "item": {"type": "agent_message", "text": "INCOMPLETE-POISON"}})
         Path(sys.argv[sys.argv.index("--output-last-message") + 1]).write_text('{"candidates": [')

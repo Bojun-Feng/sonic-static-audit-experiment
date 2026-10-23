@@ -152,6 +152,9 @@ def run_locked(tasks, binding, repo, out, reference, config, lock_root, output_f
             for name, digest in completion['artifacts'].items():
                 require(sha256(within(destination, name).read_bytes()) == digest, 'completed artifact changed')
             answer = read_json(destination / 'result.json')
+            if lane == 'discovery':
+                events = [json.loads(line) for line in (destination / 'trace.jsonl').read_text().splitlines()]
+                parse_codex(events, answer, task, repo)
             validate_answer(answer, repo, lane, prior)
             with mutex:
                 states[lane][task_id] = 'succeeded'
@@ -182,7 +185,7 @@ def run_locked(tasks, binding, repo, out, reference, config, lock_root, output_f
                     events = invoke(command, prompt, work, slot, config['timeout_seconds'], output_fd)
                     if lane == 'discovery':
                         answer = read_json(work / 'answer.json')
-                        metadata = parse_codex(events, answer)
+                        metadata = parse_codex(events, answer, task, repo)
                         (work / 'answer.json').unlink()
                     else:
                         answer, metadata = parse_claude(events)
