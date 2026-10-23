@@ -18,7 +18,7 @@ def runner_config():
     require(value["schema_version"] == 1
             and value["discovery_models"] == ["gpt-6-astra", "gpt-5.6-sol"]
             and value["verifier_model"] == "claude-opus-5-5"
-            and type(value["discovery_slots"]) is int and value["discovery_slots"] == 4
+            and type(value["discovery_slots"]) is int and value["discovery_slots"] == 16
             and type(value["verifier_slots"]) is int and value["verifier_slots"] == 1,
             "runner models and global concurrency must match production")
     require(all(type(value[k]) is int and value[k] > 0 for k in ("max_attempts", "timeout_seconds")),

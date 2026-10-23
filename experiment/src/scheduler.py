@@ -13,6 +13,7 @@ from pathlib import Path
 import stat
 import time
 
+from audit_queue import runner_config
 from common import require
 
 
@@ -45,7 +46,7 @@ class SlotPool:
         require(lane in ("discovery", "verifier"), "unknown scheduler lane")
         self.root = root
         self.lane = lane
-        self.limit = 4 if lane == "discovery" else 1
+        self.limit = runner_config()[f"{lane}_slots"]
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
         require(not root.is_symlink() and root.is_dir() and root.stat().st_uid == os.getuid(),
                 "unsafe global semaphore directory")

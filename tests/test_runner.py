@@ -78,13 +78,52 @@ class RunnerTests(unittest.TestCase):
     def events(self):
         return [json.loads(line) for line in (self.state / "events.jsonl").read_text().splitlines()]
 
-    def test_both_modes_run_twelve_fresh_sessions_with_four_slots_and_no_clean_reports(self):
-        # Hold the first wave until four CLIs are live, independent of machine
-        # speed. Exercise process-relative clocks even on newer Python versions.
-        self.scenario({"start_gate": 4, "process_relative_clock": True})
+    def test_simultaneous_pilot_arms_share_sixteen_slots_and_no_clean_reports(self):
+        from audit_queue import make_pilot_queue
+        self.scenario({"start_gate": 16, "shared_gate": True, "process_relative_clock": True})
+        source_before = {p.name: p.read_bytes() for p in (self.repo / "src").iterdir()}
+        processes = []
+        try:
+            for mode in ("exhaustive", "targeted"):
+                queue = self.base / (mode + "-queue.json")
+                make_pilot_queue(self.base / mode, mode, queue)
+                processes.append(subprocess.Popen([
+                    sys.executable, "-B", "-c",
+                    "import sys; from pathlib import Path; "
+                    "sys.path.insert(0, sys.argv.pop(1)); "
+                    "import runner; "
+                    "lock_root = Path(sys.argv.pop(1)); "
+                    "runner.global_root = lambda: lock_root; "
+                    "sys.exit(runner.main())",
+                    str(ROOT / "experiment/src"), str(self.base / "locks"),
+                    "--mode", mode, "--prepared", str(self.base / mode),
+                    "--out", str(self.base / (mode + "-run")),
+                    "--reference", str(self.reference), "--queue", str(queue)],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
+            for process in processes:
+                stdout, stderr = process.communicate(timeout=45)
+                self.assertEqual(process.returncode, 0, stdout + stderr)
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.kill()
+                process.communicate()
+        events = self.events()
+        live = set()
+        peak = 0
+        for event in events:
+            if event["event"] == "start":
+                self.assertNotIn(event["task"], live)
+                live.add(event["task"])
+            else:
+                self.assertIn(event["task"], live)
+                live.remove(event["task"])
+            self.assertLessEqual(len(live), 16)
+            peak = max(peak, len(live))
+        self.assertEqual(peak, 16)
+        self.assertFalse(live)
+        self.assertEqual(len(events), 48)
         for mode in ("exhaustive", "targeted"):
-            source_before = {p.name: p.read_bytes() for p in (self.repo / "src").iterdir()}
-            self.assertEqual(self.run_audit(mode), 0)
             out = self.base / (mode + "-run")
             status = read_json(out / "status.json")
             self.assertEqual(status["state"], "complete")
@@ -107,9 +146,9 @@ class RunnerTests(unittest.TestCase):
                     self.assertIn(e["task"], live)
                     live.remove(e["task"])
                 active = len(live)
-                self.assertLessEqual(active, 4)
+                self.assertLessEqual(active, 12)
                 peak = max(peak, active)
-            self.assertEqual(peak, 4)
+            self.assertGreater(peak, 0)
             self.assertEqual(active, 0)
             starts = [e for e in events if e["event"] == "start"]
             self.assertEqual(len(events), 24)

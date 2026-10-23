@@ -55,7 +55,7 @@ is read-only; verifier tools are limited to Read/Grep/Glob. Prompts prohibit
 source execution, tests, builds, network tools, and source edits.
 
 Each review unit gets fresh sessions for both models in `runner-config.json`.
-Kernel file locks enforce four discovery sessions and one verifier session
+Kernel file locks enforce sixteen discovery sessions and one verifier session
 across runner processes for the Unix user, independent of mode or output path.
 A failed or incomplete session retries in a fresh working directory. Only a
 validated final success is atomically moved to `results/discovery/TASK` or
@@ -84,7 +84,10 @@ python3 -B experiment/src/audit_queue.py --prepared results/exhaustive --mode ex
 ```
 
 Repeat with `targeted` for six groups. Each queue schedules twelve discovery
-sessions. Supply six `--path` arguments to choose explicit paths instead of the
+sessions. Run the exhaustive and targeted arms simultaneously (24 sessions total)
+to exercise the shared global 16-slot discovery limit; a single twelve-session
+arm cannot saturate it. Verifier concurrency remains one across both arms.
+Supply six `--path` arguments to choose explicit paths instead of the
 first six available units. No VM operations are performed by the runner.
 
 For an archive without Git metadata, `source_identity.py --repo DIR --commit SHA --out FILE` creates an

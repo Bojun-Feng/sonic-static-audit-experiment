@@ -30,7 +30,7 @@ def hold_slot(root, lane, number):
 
         event("start")
         (root / f"acquired-{number}").touch()
-        deadline = time.monotonic() + 20
+        deadline = time.monotonic() + 60
         while not (root / "release").exists():
             if time.monotonic() > deadline:
                 raise RuntimeError("test release timeout")
@@ -39,21 +39,38 @@ def hold_slot(root, lane, number):
 
 
 class SchedulerTests(unittest.TestCase):
+    def test_production_limits(self):
+        from audit_queue import runner_config
+        config = runner_config()
+        self.assertEqual(config["discovery_slots"], 16)
+        self.assertEqual(config["verifier_slots"], 1)
+
+    def test_scheduler_uses_configuration(self):
+        from audit_queue import runner_config
+        from scheduler import SlotPool
+        from unittest import mock
+        config = runner_config()
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch("scheduler.runner_config", return_value={
+                    **config, "discovery_slots": 3}):
+                self.assertEqual(SlotPool(Path(directory), "discovery").limit, 3)
+                self.assertEqual(SlotPool(Path(directory), "verifier").limit, 1)
+
     def test_global_limits_span_processes_and_drain_waiters(self):
         from scheduler import SlotPool
         with tempfile.TemporaryDirectory() as directory:
             ctx = multiprocessing.get_context("spawn")
-            for lane, limit in (("discovery", 4), ("verifier", 1)):
+            for lane, limit in (("discovery", 16), ("verifier", 1)):
                 root = Path(directory) / lane
                 root.mkdir()
-                workers = [ctx.Process(target=hold_slot, args=(str(root), lane, i)) for i in range(12)]
+                workers = [ctx.Process(target=hold_slot, args=(str(root), lane, i)) for i in range(24)]
                 try:
                     for worker in workers:
                         worker.start()
                     deadline = time.monotonic() + 20
-                    while len(list(root.glob("ready-*"))) != 12 and time.monotonic() < deadline:
+                    while len(list(root.glob("ready-*"))) != 24 and time.monotonic() < deadline:
                         time.sleep(0.02)
-                    self.assertEqual(len(list(root.glob("ready-*"))), 12)
+                    self.assertEqual(len(list(root.glob("ready-*"))), 24)
                     (root / "gate").touch()
                     deadline = time.monotonic() + 20
                     while len(list(root.glob("acquired-*"))) < limit and time.monotonic() < deadline:
@@ -66,7 +83,7 @@ class SchedulerTests(unittest.TestCase):
                     # The locked append order is shared across processes;
                     # per-process monotonic clock origins may be different.
                     events = [json.loads(line) for line in (root / "events.jsonl").read_text().splitlines()]
-                    self.assertEqual(len(events), 24)
+                    self.assertEqual(len(events), 48)
                     live = {}
                     seen = set()
                     peak = 0
@@ -83,7 +100,7 @@ class SchedulerTests(unittest.TestCase):
                             self.assertEqual(live.pop(number), slot)
                         self.assertLessEqual(len(live), limit)
                         peak = max(peak, len(live))
-                    self.assertEqual(seen, set(range(12)))
+                    self.assertEqual(seen, set(range(24)))
                     self.assertEqual(peak, limit)
                     self.assertEqual(live, {})
                 finally:

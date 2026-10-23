@@ -68,7 +68,7 @@ if kind == "codex" and scenario.get("start_gate"):
             fcntl.flock(handle, fcntl.LOCK_SH)
             events = [json.loads(line) for line in handle]
         starts = [e for e in events if e["kind"] == kind and e["event"] == "start"
-                  and e["task"].startswith(task["mode"] + "--")]
+                  and (scenario.get("shared_gate") or e["task"].startswith(task["mode"] + "--"))]
         if len(starts) >= scenario["start_gate"]:
             break
         if time.monotonic() > deadline:
