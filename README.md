@@ -50,9 +50,15 @@ authenticated, run either prepared mode:
 `--prepared DIR` defaults to `results/MODE`; `--out DIR` defaults to
 `results/MODE-run`. These directories, the source, and reference inputs must be
 disjoint. Run invokes provider CLIs; preparation and the local tests do not.
-Source and reference inputs should be mounted read-only. The discovery sandbox
-is read-only; verifier tools are limited to Read/Grep/Glob. Prompts prohibit
-source execution, tests, builds, network tools, and source edits.
+Source and reference inputs should be mounted read-only. Discovery uses
+`--sandbox danger-full-access` with `approval_policy="never"`: the Linux guest
+runtime failed to execute inspection commands in `read-only` mode, while a direct
+probe with this mode retained a completed native command event and source output.
+Filesystem protection comes from the VM's read-only source/reference mounts;
+Codex does not enforce a read-only sandbox in this mode. Verifier tools remain
+limited to Read/Grep/Glob. Prompts still prohibit source execution, tests, builds,
+network tools, and source edits, and the required command-trace validator is
+unchanged.
 
 Each review unit gets fresh sessions for both models in `runner-config.json`.
 Kernel file locks enforce sixteen discovery sessions and one verifier session

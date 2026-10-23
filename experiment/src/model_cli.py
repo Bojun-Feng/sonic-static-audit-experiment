@@ -13,7 +13,7 @@ def discovery_command(binary, model, work):
     require(model in runner_config()["discovery_models"], "unconfigured discovery model")
     return [binary, "exec", "--model", model, "--ephemeral", "--json",
             "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check",
-            "--sandbox", "read-only", "--color", "never", "--cd", str(work),
+            "--sandbox", "danger-full-access", "--color", "never", "--cd", str(work),
             "-c", 'approval_policy="never"', "-c", 'web_search="disabled"',
             "-c", "features.multi_agent=false", "-c", "features.apps=false",
             "-c", "project_doc_max_bytes=0", "-c", "check_for_update_on_startup=false",

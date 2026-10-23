@@ -21,7 +21,19 @@ class ModelCLITests(unittest.TestCase):
         self.task = {"path": "route.cpp"}
         (self.repo / "route.cpp").write_text("void updateRoute();\n")
 
-    def test_commands_use_fresh_pinned_read_only_sessions(self):
+    def test_discovery_uses_guest_compatible_execution_mode(self):
+        from audit_queue import runner_config
+        from model_cli import discovery_command
+        for model in runner_config()["discovery_models"]:
+            with self.subTest(model=model):
+                command = discovery_command("/usr/bin/codex", model, self.repo)
+                self.assertEqual(command.count("--sandbox"), 1)
+                self.assertEqual(command[command.index("--sandbox") + 1], "danger-full-access")
+                self.assertIn('approval_policy="never"', command)
+                self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", command)
+                self.assertNotIn("--full-auto", command)
+
+    def test_commands_use_fresh_pinned_sessions(self):
         from model_cli import discovery_command, verifier_command
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)
@@ -30,7 +42,6 @@ class ModelCLITests(unittest.TestCase):
             for flag in ("--ephemeral", "--json", "--skip-git-repo-check", "--ignore-user-config"):
                 self.assertIn(flag, command)
             self.assertEqual(command[command.index("--model") + 1], "gpt-6-astra")
-            self.assertEqual(command[command.index("--sandbox") + 1], "read-only")
             self.assertIn('approval_policy="never"', command)
             self.assertNotIn("resume", command)
             self.assertNotIn("--add-dir", command)  # In Codex this would grant writes.
