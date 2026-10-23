@@ -299,6 +299,26 @@ sys.exit(runner.main())
         self.assertEqual(len(list((self.base / 'diagnostics').rglob('failure.json'))), 4)
         self.assertFalse((out / 'notifications.jsonl').exists())
 
+    def test_chained_inspection_in_one_shell_line_is_accepted_end_to_end(self):
+        self.scenario({'codex': {'src/route0.cpp': {'inspection': 'chained', 'candidates': [finding('src/route0.cpp')]}}})
+        self.assertEqual(self.run_review(), 0)
+        out = self.base / 'exhaustive-run'
+        self.assertFalse((out / 'notifications.jsonl').exists())
+        self.assertEqual(len(list((self.base / 'diagnostics').rglob('failure.json'))), 0)
+        checked = 0
+        for completion in (out / 'results/discovery').glob('*/completion.json'):
+            if read_json(completion)['task']['path'] != 'src/route0.cpp':
+                continue
+            checked += 1
+            self.assertEqual(read_json(completion.parent / 'metadata.json')['attempt'], 1)
+            records = [json.loads(line) for line in (completion.parent / 'trace.jsonl').read_text().splitlines()]
+            commands = [e['item']['command'] for e in records if e.get('item', {}).get('type') == 'command_execution']
+            self.assertEqual(len(commands), 1)
+            self.assertIn(' && ', commands[0])
+            self.assertIn('; grep -rn key ', commands[0])
+        self.assertEqual(checked, 2)
+        self.assertEqual(len(list((out / 'results/candidates').iterdir())), 1)
+
     def test_isolation_failure_is_private_deterministic_and_never_starts_a_model(self):
         from common import AttemptError
         error = AttemptError('configuration', 'worker_isolation', 'isolation_unavailable', False,

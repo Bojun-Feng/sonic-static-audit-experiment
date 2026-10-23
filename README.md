@@ -136,21 +136,34 @@ Discovery acceptance requires successful native `command_execution` events befor
 the final answer, including for an empty candidate list. The retained output must
 cover the assigned file and show related source context. Whole reads, numbered
 reads, or multiple complete ranges can establish coverage. Accepted forms include
-`cat` (with or without `--`), `sed -n` ranges, `nl -ba`, and `head`/`tail` ranges.
-Numbered `rg` and `grep` searches can use different flag spellings, literal or
-regular-expression patterns, and source directories or specific files. Reads of
-related C/C++ source containing an assigned-file identifier also establish
-context. Local search hits suffice when there are no external references.
+`cat` (with or without `--`, one or several files), `sed -n` ranges (including
+`A,Bp;C,Dp` lists), `nl -ba`, `cat -n`, and `head`/`tail` ranges, alone or piped
+through those same range and numbering filters (for example
+`nl -ba FILE | sed -n '241,480p'`). Numbered `rg` and `grep` searches can use
+different flag spellings, literal or regular-expression patterns, context lines
+(`-A`/`-B`/`-C`), a `head` bound, and source directories or specific files; search
+roots may also name reference inputs, whose hits earn nothing. Reads of related
+C/C++ source containing an assigned-file identifier also establish context. Local
+search hits suffice when there are no external references.
 
-Paths can be absolute or source-relative, including after `cd SOURCE && ...`;
-`sh`/`bash`/`zsh` wrappers are recognized. A search bounded by `head -n N` can still
-show context. Every counted line is checked against source bytes and line
-numbers. Reads must retain their complete requested ranges, with all assigned
-lines covered across reads. At least two distinct successful command events are
-required. No-tool sessions, listings, prose claims, source cards, failed reads,
-unrelated content, and fabricated/truncated evidence do not establish coverage.
-The validator never executes saved commands. This proves recorded source access
-and related context, not semantic review quality or complete caller coverage.
+One retained command may chain several simple commands with `&&`, `;`, `||`, or
+newlines. The validator reconstructs the exact expected bytes of every read (and
+of `wc -l`) from the source and attributes the aggregated output to the chain in
+order. Commands whose output cannot be reconstructed (reads of source cards or
+references, listings, echoes, `find`) are skipped without credit, and a search's
+output is verified only when its boundaries in the chain are known. A chain's exit
+status reflects only its last command, so byte-exact reads and verified searches
+in a chain keep their credit, while a single failed command never counts. Paths
+can be absolute or source-relative, including after `cd SOURCE && ...`;
+`sh`/`bash`/`zsh` wrappers and a discarded stderr (`2>/dev/null`) are recognized.
+Every counted line is checked against source bytes and line numbers. Reads must
+retain their complete requested ranges, with all assigned lines covered across
+reads. At least two distinct credited commands are required; chained commands
+count individually. No-tool sessions, listings, prose claims, source cards,
+failed reads, unrelated content, and fabricated/truncated evidence do not
+establish coverage. The validator never executes saved commands. This proves
+recorded source access and related context, not semantic review quality or
+complete caller coverage.
 
 Resume checks the native trace again after verifying artifact hashes; a valid
 completion record alone cannot authorize passive results. Historical traces

@@ -98,6 +98,12 @@ if kind == "codex":
             commands = [(['sed', '-n', '1,1p', str(root / path)], None),
                         (['sed', '-n', '2,$p', str(root / path)], None),
                         (['grep', '-Rn', 'key', str(root)], None)]
+        elif behavior.get('inspection') == 'chained':
+            # One shell line chaining range reads and a search, as native sessions do.
+            source = shlex.quote(str(root / path))
+            script = (f"wc -l {source} && sed -n '1,1p' {source} && sed -n '2,$p' {source}; "
+                      f"grep -rn key {shlex.quote(str(root))}")
+            commands = [(['/bin/bash', '-lc', script], None)]
         for number, (argv, local) in enumerate(commands):
             result = subprocess.run(local or argv, capture_output=True, text=True, check=True)
             emit({"type": "item.completed", "item": {"id": f"inspection-{number}",
