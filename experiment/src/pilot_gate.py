@@ -11,6 +11,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import sys
 
 from common import ReviewError, json_bytes, within
@@ -37,18 +38,34 @@ def strings(value):
             yield from strings(item)
 
 
-def sibling_reads(trace, own):
-    """Verifier tool inputs that reach into results other than the candidate's own validation input."""
-    found = []
+RESULT_LEAK = re.compile(r'results/(?:discovery|candidates|verifier|validation)/[^\s"\'\\]*')
+
+
+def inside(path, roots):
+    real = os.path.realpath(path)
+    return any(real == root or real.startswith(root + os.sep) for root in roots)
+
+
+def verifier_reads(trace, roots, own):
+    """(tool inputs outside the allowed roots, tool results mentioning other results).
+
+    A blinded verifier may read only the source, the references, and its own
+    validation input; any absolute path elsewhere in a tool input, or any other
+    results path in a tool result, is a leak attempt or a leak.
+    """
+    outside, leaks = [], []
     for line in trace.splitlines():
         event = json.loads(line)
-        if event.get('type') != 'assistant':
-            continue
-        for block in event.get('message', {}).get('content', []):
-            if isinstance(block, dict) and block.get('type') == 'tool_use':
-                found.extend(text for text in strings(block.get('input'))
-                             if ('results/' in text and own not in text) or 'trace.jsonl' in text)
-    return found
+        for block in event.get('message', {}).get('content', []) if event.get('type') in ('assistant', 'user') else []:
+            if not isinstance(block, dict):
+                continue
+            if block.get('type') == 'tool_use':
+                outside.extend(text for text in strings(block.get('input'))
+                               if text.startswith('/') and not inside(text, roots))
+            elif block.get('type') == 'tool_result':
+                text = ' '.join(strings(block.get('content')))
+                leaks.extend(match.group(0) for match in RESULT_LEAK.finditer(text) if not match.group(0).startswith(own))
+    return outside, leaks
 
 
 def evaluate_run(root, max_candidates, max_admitted_ratio, max_discovery_failures, gates):
@@ -122,23 +139,30 @@ def evaluate_run(root, max_candidates, max_admitted_ratio, max_discovery_failure
         if not shape:
             malformed.append(candidate_id)
     check('fix_shape', not malformed, f"confirmed={counts['confirmed']} malformed={len(malformed)}")
-    leaks, reads, sizes = [], [], []
+    leaks, outside, result_leaks, sizes = [], [], [], []
     for candidate_id in verdicts:
         prompt = files[f'results/verifier/{candidate_id}/prompt.txt'].decode()
         own = f'results/validation/{candidate_id}/validation-input.json'
         sizes.append(len(prompt.encode()))
         if any(leak in prompt for leak in LEAKS) or prompt.count('validation-input.json') != 1 or own not in prompt:
             leaks.append(candidate_id)
-        if sibling_reads(files[f'results/verifier/{candidate_id}/trace.jsonl'].decode(), f'results/validation/{candidate_id}'):
-            reads.append(candidate_id)
+        context = json.loads(prompt.split('\nVerification context:\n', 1)[1])
+        roots = [os.path.realpath(context['source_root']), os.path.realpath(context['reference_root']),
+                 os.path.realpath(str(root / 'results/validation' / candidate_id))]
+        reads, mentions = verifier_reads(files[f'results/verifier/{candidate_id}/trace.jsonl'].decode(), roots,
+                                         f'results/validation/{candidate_id}/')
+        if reads:
+            outside.append(candidate_id)
+        if mentions:
+            result_leaks.append(candidate_id)
     bad_inputs = [cid for cid, value in validations.items()
                   if set(value) != set(VALIDATION_FIELDS)
                   or any(set(claim) != {'title', 'root_cause'} for claim in value['claims'])]
     spread = max(sizes) - min(sizes) if sizes else 0
-    check('independence', not leaks and not reads and not bad_inputs and spread < PROMPT_SPREAD_BYTES
-          and set(validations) == set(candidates),
-          f'verdicts={len(verdicts)} prompt_leaks={len(leaks)} sibling_reads={len(reads)} '
-          f'bad_inputs={len(bad_inputs)} prompt_spread_bytes={spread}')
+    check('independence', not leaks and not outside and not result_leaks and not bad_inputs
+          and spread < PROMPT_SPREAD_BYTES and set(validations) == set(candidates),
+          f'verdicts={len(verdicts)} prompt_leaks={len(leaks)} outside_roots={len(outside)} '
+          f'result_leaks={len(result_leaks)} bad_inputs={len(bad_inputs)} prompt_spread_bytes={spread}')
     cost, durations = 0.0, []
     for candidate_id in verdicts:
         metadata = json.loads(files[f'results/verifier/{candidate_id}/metadata.json'])

@@ -90,6 +90,21 @@ class PilotGateTests(unittest.TestCase):
         (run,) = uncovered['runs'].values()
         self.assertIn('uncovered_units=1', run['checks']['integrity']['detail'])
 
+    def test_independence_requires_verifier_reads_inside_allowed_roots(self):
+        from pilot_gate import evaluate
+        paths = [f'src/route{i}.cpp' for i in range(3)]
+        self.scenario({'codex': {p: {'candidates': [test_runner.finding(p)]} for p in paths},
+                       'claude': {paths[1]: {'reads': ['/']},
+                                  paths[2]: {'result_suffix': ' see /elsewhere/results/verifier/c-0/result.json'}}})
+        self.assertEqual(self.run_review(), 0)
+        report = evaluate([self.base / 'exhaustive-run'], positives=[], negatives=[], max_candidates=4)
+        self.assertFalse(report['passed'])
+        (run,) = report['runs'].values()
+        self.assertFalse(run['checks']['independence']['pass'])
+        self.assertIn('outside_roots=1', run['checks']['independence']['detail'])
+        self.assertIn('result_leaks=1', run['checks']['independence']['detail'])
+        self.assertTrue(all(check['pass'] for name, check in run['checks'].items() if name != 'independence'))
+
     def test_gate_refuses_changed_artifacts(self):
         from pilot_gate import evaluate
         self.scenario({'codex': {'src/route0.cpp': {'candidates': [test_runner.finding('src/route0.cpp')]}}})

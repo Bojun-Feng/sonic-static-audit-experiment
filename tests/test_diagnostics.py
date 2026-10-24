@@ -74,6 +74,67 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertIn('deny mach-priv-task-port', command[2])
         self.assertIn('\\"private\\"', command[2])
 
+    def test_hidden_trees_are_masked_and_inputs_re_exposed_read_only(self):
+        root = Path('/var/tmp/review-diagnostics')
+        hidden = [Path('/mnt/results')]
+        exposed = [Path('/mnt/source'), Path('/mnt/results/production/prepared/exhaustive'),
+                   Path('/mnt/results/production/exhaustive-run/results/validation/c-1')]
+        with mock.patch('diagnostics.sys.platform', 'linux'), \
+                mock.patch('diagnostics.shutil.which', return_value='/usr/bin/bwrap'):
+            command = isolation_prefix(root, hidden, exposed)
+        positions = [i for i, arg in enumerate(command) if arg == '/mnt/results']
+        # Mask the hidden tree, re-expose the inputs read-only inside it, then seal the mask.
+        self.assertEqual([command[i - 1] for i in positions], ['--tmpfs', '--remount-ro'])
+        binds = [i for i, arg in enumerate(command) if arg == '--ro-bind']
+        self.assertEqual([command[i + 1] for i in binds], [str(p) for p in exposed])
+        self.assertTrue(all(command[i + 1] == command[i + 2] for i in binds))
+        self.assertLess(command.index(str(root)), positions[0])
+        self.assertLess(positions[0], binds[0])
+        self.assertLess(binds[-1], positions[1])
+        self.assertEqual(command[-3:], ['--cap-drop', 'ALL', '--'])
+        with mock.patch('diagnostics.sys.platform', 'darwin'):
+            command = isolation_prefix(root, hidden, exposed)
+        profile = command[2]
+        deny = profile.index('(deny file-read* file-write* (subpath "/mnt/results"))')
+        allow = profile.index('(allow file-read* (subpath "/mnt/results/production/prepared/exhaustive"))')
+        self.assertLess(deny, allow)
+        self.assertIn('(allow file-read* (subpath "/mnt/source"))', profile)
+        self.assertLess(profile.index(str(root)), deny)
+
+    @unittest.skipUnless(sys.platform == 'darwin' and Path('/usr/bin/sandbox-exec').exists(), 'real sandbox-exec probe')
+    def test_real_probe_denies_hidden_trees_and_allows_exposed_inputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory).resolve()
+            root = base / 'diagnostics'
+            root.mkdir(mode=0o700)
+            hidden = base / 'runs'
+            exposed = hidden / 'prepared'
+            exposed.mkdir(parents=True)
+            (exposed / 'manifest.json').write_text('{}')
+            probe_dir = hidden / 'exhaustive-run/work'
+            probe_dir.mkdir(parents=True)
+            try:
+                prefix = verified_worker_prefix(root, [], [hidden], [exposed], probe_dir)
+            except AttemptError as exc:
+                if 'Operation not permitted' in str(exc):
+                    self.skipTest('nested sandbox unavailable here')
+                raise
+            self.assertEqual(prefix[0], '/usr/bin/sandbox-exec')
+            self.assertEqual(list(probe_dir.iterdir()), [])
+            self.assertEqual(list(root.iterdir()), [])
+            real = isolation_prefix
+            # Without the exposure the probe refuses: an input the worker needs is unreadable.
+            with mock.patch('diagnostics.isolation_prefix', side_effect=lambda r, h=(), e=(): real(r, h, ())):
+                with self.assertRaises(AttemptError) as caught:
+                    verified_worker_prefix(root, [], [hidden], [exposed], probe_dir)
+            self.assertIn('exposed', str(caught.exception))
+            # Without the mask the hidden sentinel is readable: refused as well.
+            with mock.patch('diagnostics.isolation_prefix', side_effect=lambda r, h=(), e=(): real(r, (), e)):
+                with self.assertRaises(AttemptError) as caught:
+                    verified_worker_prefix(root, [], [hidden], [exposed], probe_dir)
+            self.assertIn('hidden', str(caught.exception))
+            self.assertEqual(list(probe_dir.iterdir()), [])
+
     def test_missing_enforcement_never_falls_back_to_unprotected_execution(self):
         with mock.patch('diagnostics.sys.platform', 'linux'), \
                 mock.patch('diagnostics.shutil.which', return_value=None), \

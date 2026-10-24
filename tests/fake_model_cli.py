@@ -145,7 +145,20 @@ else:
     if behavior.get("inconsistent"):
         # A confirmed verdict that also names a failed gate must be refused by the runner.
         verdict["failed_gates"] = ["fix_unique"]
-    emit({"type": "system", "subtype": "init", "session_id": session, "model": model})
+    emit({"type": "system", "subtype": "init", "session_id": session, "model": model,
+          "tools": ["Glob", "Grep", "Read", "StructuredOutput"]})
+    # Native-style tool events: what the session read, and whether the OS boundary let it.
+    reads = behavior.get("reads", [str(validation_path), str(Path(context["source_root"]) / path)])
+    for number, target in enumerate(reads + behavior.get("peek", [])):
+        use_id = f"toolu_{number}"
+        emit({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": use_id, "name": "Read",
+                                                             "input": {"file_path": target}}]}})
+        try:
+            text = f"READ {len(Path(target).read_bytes())} bytes from {target}"
+        except OSError as exc:
+            text = f"DENIED {type(exc).__name__} {target}"
+        emit({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": use_id,
+                                                        "content": text + behavior.get("result_suffix", "")}]}})
     if failure != "partial":
         emit({"type": "result", "subtype": "success", "is_error": False, "session_id": session,
               "structured_output": verdict, "usage": {"input_tokens": 70, "cache_read_input_tokens": 10},

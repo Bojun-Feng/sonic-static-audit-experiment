@@ -5,7 +5,7 @@ usage() {
     cat <<'EOF'
 Usage:
   run-experiment.sh prepare {exhaustive|targeted} [--repo DIR] [--out DIR] [--config FILE] [--identity FILE]
-  run-experiment.sh run {exhaustive|targeted} --reference DIR [--prepared DIR] [--out DIR] [--queue FILE] [--diagnostics-root DIR] [--max-verifier-tasks N]
+  run-experiment.sh run {exhaustive|targeted} --reference DIR [--prepared DIR] [--out DIR] [--queue FILE] [--diagnostics-root DIR] [--max-verifier-tasks N] [--hide DIR]...
 Prepare performs local static selection only. Run invokes standalone model CLIs.
 Defaults: sibling sonic-swss source, results/MODE prepared inputs, results/MODE-run output.
 EOF
@@ -35,9 +35,16 @@ identity=''
 queue=''
 diagnostics=''
 verifier_cap=''
+hide=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --hide)
+            [[ $# -ge 2 && -n $2 && $2 != --* ]] || fail "$1 requires a value"
+            [[ $action == run ]] || fail "$1 is only valid for run"
+            hide+=("$2")
+            shift 2
+            ;;
         --repo|--out|--config|--identity|--prepared|--reference|--queue|--diagnostics-root|--max-verifier-tasks)
             [[ $# -ge 2 && -n $2 && $2 != --* ]] || fail "$1 requires a value"
             case "$1" in
@@ -69,6 +76,9 @@ if [[ $action == run ]]; then
     [[ -z $queue ]] || args+=(--queue "$queue")
     [[ -z $diagnostics ]] || args+=(--diagnostics-root "$diagnostics")
     [[ -z $verifier_cap ]] || args+=(--max-verifier-tasks "$verifier_cap")
+    if [[ ${#hide[@]} -gt 0 ]]; then
+        for dir in "${hide[@]}"; do args+=(--hide "$dir"); done
+    fi
     exec python3 -B "$script_dir/src/runner.py" "${args[@]}"
 fi
 args=(--repo "$repo" --config "$config" --out "$out" --mode "$mode")

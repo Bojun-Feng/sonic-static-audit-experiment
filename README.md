@@ -152,6 +152,19 @@ inside the boundary, so unavailable or unusable isolation fails without calling
 a provider. Permissions or prompt instructions alone are not the worker boundary.
 The source and reference mounts remain read-only as before.
 
+The same boundary hides run outputs from model sessions. The run's parent
+directory is always masked (an empty read-only mount on Linux, a denied subpath
+on macOS), so sibling arms and earlier runs next to it are invisible; pass
+`--hide DIR` (repeatable) to mask a shared results tree such as the results
+mount. Inside the mask only the worker's inputs are bound back read-only: the
+prepared inputs for discovery sessions, and for each verifier session its own
+`results/validation/ID` directory. This matters because the verifier's
+`--add-dir` list confines the Read tool but not Grep or Glob: a search rooted
+above the results tree can otherwise return lines from other candidates'
+reports, results, and traces. The pre-flight probe also checks that a sentinel
+inside a hidden tree is unreadable and that every exposed input is readable.
+Scratch (`TMPDIR`) and the CLI executables must be outside the hidden trees.
+
 Discovery acceptance requires successful native `command_execution` events before
 the final answer, including for an empty candidate list. The retained output must
 cover the assigned file and show related source context. Whole reads, numbered
@@ -259,8 +272,10 @@ candidate count per run against `--max-candidates` (and, only when
 `--max-admitted-ratio` is given, admitted over raw findings, which depends on
 how positive-heavy the queue is); the fix shape of every confirmed verdict;
 verifier independence (no prior verdicts, sibling candidates, discovery
-evidence, or trace paths in any verifier prompt or tool input, validation
-inputs limited to their allowed fields, prompt sizes within 2 KB of each
+evidence, or trace paths in any verifier prompt; every absolute path in a
+verifier tool input inside the source, the references, or that session's own
+validation directory; no other results path in any tool result; validation
+inputs limited to their allowed fields; prompt sizes within 2 KB of each
 other); the positive/negative control paths; and the verifier cost. It prints
 PASS or FAIL per check, writes the JSON report, and exits nonzero on any
 failure. A failed gate means tune the prompts or controls, use a new output

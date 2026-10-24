@@ -64,7 +64,10 @@ class RunnerTests(unittest.TestCase):
                     redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                 selection.select(self.repo, self.config_path, out, mode, identity=self.identity)
                 if mode == "targeted": extract(self.repo, out / "selected-groups.json")
-        self.bin = self.base / "bin"
+        # Fake CLIs live outside the run parent: workers may not execute from a hidden tree.
+        self.bin_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.bin_temp.cleanup)
+        self.bin = Path(self.bin_temp.name) / "bin"
         self.bin.mkdir()
         for name in ("codex", "claude"):
             script = self.bin / name
@@ -82,13 +85,17 @@ class RunnerTests(unittest.TestCase):
         self.isolation = mock.patch('runner.verified_worker_prefix', return_value=[])
         self.isolation.start()
         self.addCleanup(self.isolation.stop)
+        self.prefix = mock.patch('runner.isolation_prefix', return_value=[])
+        self.prefix.start()
+        self.addCleanup(self.prefix.stop)
         launcher = self.bin / 'python3'
         launcher.write_text(f'#!{sys.executable} -B\n' + '''import os, sys
 assert sys.argv[1] == '-B'
 sys.argv = sys.argv[2:]
 sys.path.insert(0, os.path.dirname(sys.argv[0]))
 import runner
-runner.verified_worker_prefix = lambda *args: []
+runner.verified_worker_prefix = lambda *args, **kwargs: []
+runner.isolation_prefix = lambda *args, **kwargs: []
 runner.global_root = lambda: __import__('pathlib').Path(__file__).parent.parent / 'locks'
 sys.exit(runner.main())
 ''')
@@ -119,7 +126,8 @@ sys.exit(runner.main())
                     "import sys; from pathlib import Path; "
                     "sys.path.insert(0, sys.argv.pop(1)); "
                     "import runner; "
-                    "runner.verified_worker_prefix = lambda *args: []; "
+                    "runner.verified_worker_prefix = lambda *args, **kwargs: []; "
+                    "runner.isolation_prefix = lambda *args, **kwargs: []; "
                     "lock_root = Path(sys.argv.pop(1)); "
                     "runner.global_root = lambda: lock_root; "
                     "sys.exit(runner.main())",
@@ -514,6 +522,59 @@ sys.exit(runner.main())
                              diagnostics_root=self.base / "diagnostics", max_verifier_tasks=3), 0)
         self.assertEqual([e for e in self.events() if e["kind"] == "codex"], codex_before)
         self.assertEqual(read_json(out / "status.json")["verifier"]["succeeded"], 3)
+
+    def test_worker_boundary_hides_sibling_outputs_and_exposes_only_inputs(self):
+        import runner
+        out = (self.base / 'exhaustive-run').resolve()
+        out.mkdir()
+        extra = Path(self.bin_temp.name) / 'shared-results'
+        (extra / 'nested').mkdir(parents=True)
+        hidden, exposed = runner.worker_boundary(out, self.repo.resolve(), self.reference.resolve(),
+                                                 (self.base / 'exhaustive').resolve(), [extra, extra / 'nested', out])
+        # Default: the run's parent directory. Nested hidden directories collapse into their parent.
+        self.assertEqual(hidden, sorted({out.parent, extra.resolve()}))
+        (self.base / 'inside').mkdir()
+        self.assertEqual(runner.worker_boundary(out, self.repo.resolve(), self.reference.resolve(),
+                                                (self.base / 'exhaustive').resolve(), [self.base / 'inside'])[0],
+                         [out.parent])
+        self.assertEqual(exposed, [self.repo.resolve(), self.reference.resolve(), (self.base / 'exhaustive').resolve()])
+        with self.assertRaises(ReviewError):
+            runner.worker_boundary(out, self.repo.resolve(), self.reference.resolve(),
+                                   (self.base / 'exhaustive').resolve(), [self.base / 'does-not-exist'])
+        with self.assertRaises(ReviewError):
+            runner.worker_boundary(out, self.repo.resolve(), self.reference.resolve(),
+                                   (self.base / 'exhaustive').resolve(), ['relative/path'])
+
+    def test_hidden_scratch_or_cli_is_refused_before_any_model_call(self):
+        from runner import run
+        with self.assertRaises(ReviewError):
+            run(self.base / 'exhaustive', 'exhaustive', self.base / 'exhaustive-run', self.reference,
+                lock_root=self.base / 'locks', diagnostics_root=self.base / 'diagnostics',
+                hide=[Path(tempfile.gettempdir())])
+        self.assertFalse((self.state / 'events.jsonl').exists())
+        self.assertFalse((self.base / 'exhaustive-run').exists())
+
+    def test_each_worker_gets_its_own_boundary_with_only_its_inputs_exposed(self):
+        import runner
+        calls = []
+
+        def recorder(root, hidden=(), exposed=()):
+            calls.append((Path(root), list(hidden), list(exposed)))
+            return []
+
+        self.scenario({'codex': {'src/route0.cpp': {'candidates': [finding('src/route0.cpp')]}}})
+        with mock.patch('runner.isolation_prefix', side_effect=recorder):
+            self.assertEqual(self.run_review(), 0)
+        out = (self.base / 'exhaustive-run').resolve()
+        repo, reference, prepared = self.repo.resolve(), self.reference.resolve(), (self.base / 'exhaustive').resolve()
+        discovery = [c for c in calls if c[2][-1] == prepared]
+        verifier = [c for c in calls if c[2][-1] != prepared]
+        self.assertEqual(len(discovery), 12)
+        self.assertEqual(len(verifier), 1)
+        self.assertTrue(all(hidden == [out.parent] and exposed[:2] == [repo, reference] for _, hidden, exposed in calls))
+        candidate = next((out / 'results/candidates').iterdir()).name
+        self.assertEqual(verifier[0][2], [repo, reference, out / 'results/validation' / candidate])
+        self.assertTrue(all(root == (self.base / 'diagnostics').resolve() for root, _, _ in calls))
 
     def test_schemas_match_the_runner_gate_contract(self):
         import runner

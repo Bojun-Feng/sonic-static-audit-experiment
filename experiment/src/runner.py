@@ -28,7 +28,7 @@ import traceback
 from review_queue import EXPERIMENT, build_tasks, runner_config
 from common import (AttemptError, ReviewError, exact_children, json_bytes, keys, read_json, require, sha256,
                     source_and_output, source_lines, within)
-from diagnostics import default_root, private_root, verified_worker_prefix
+from diagnostics import default_root, isolation_prefix, private_root, verified_worker_prefix
 from model_cli import (discovery_command, discovery_prompt, parse_codex, parse_claude,
                        verifier_command, verifier_prompt)
 from scheduler import SlotPool, bind_diagnostics_root, global_root, open_lock
@@ -181,7 +181,25 @@ def invoke(command, prompt, work, slot, timeout, output_fd, capture):
     return events
 
 
-def run(prepared, mode, out, reference, queue=None, lock_root=None, diagnostics_root=None, max_verifier_tasks=None):
+def worker_boundary(out, repo, reference, prepared, hide=()):
+    """Trees masked from every worker, and the inputs re-exposed read-only inside them.
+
+    The run's parent directory is always hidden, so sibling arms and earlier runs
+    next to it are invisible to model sessions; a shared results tree is hidden
+    with --hide. Nested hidden trees collapse into their parent.
+    """
+    hidden = []
+    for path in (out.parent, *hide):
+        path = Path(path)
+        require(path.is_absolute(), f'hidden directories must be absolute: {path}')
+        require(not path.is_symlink() and path.is_dir(), f'hidden directory does not exist: {path}')
+        hidden.append(path.resolve())
+    hidden = sorted({path for path in hidden if not any(path != other and path.is_relative_to(other) for other in hidden)})
+    return hidden, [repo, reference, prepared.resolve()]
+
+
+def run(prepared, mode, out, reference, queue=None, lock_root=None, diagnostics_root=None, max_verifier_tasks=None,
+        hide=()):
     prepared, reference = Path(prepared), Path(reference)
     require(max_verifier_tasks is None or (type(max_verifier_tasks) is int and max_verifier_tasks >= 0),
             'the verifier cap must be a non-negative integer')
@@ -193,10 +211,13 @@ def run(prepared, mode, out, reference, queue=None, lock_root=None, diagnostics_
     for protected in (prepared.resolve(), reference):
         require(not out.is_relative_to(protected) and not protected.is_relative_to(out),
                 'run output must be disjoint from prepared inputs and references')
+    hidden, exposed = worker_boundary(out, repo, reference, prepared, hide)
     # Resolve/prove the storage boundary before writing any run output.
     scratch = Path(tempfile.gettempdir()).resolve()
     for protected in (EXPERIMENT.parent, repo, out, prepared.resolve(), reference):
         require(not scratch.is_relative_to(protected), 'worker scratch must be outside repository, results, and inputs')
+    for protected in hidden:
+        require(not scratch.is_relative_to(protected), 'worker scratch must be outside hidden directories')
     diagnostics = private_root(diagnostics_root or default_root(), (repo, out, prepared, reference))
     require(not scratch.is_relative_to(diagnostics), 'worker scratch must be outside diagnostics')
     lock_root = Path(lock_root or global_root())
@@ -214,7 +235,7 @@ def run(prepared, mode, out, reference, queue=None, lock_root=None, diagnostics_
         except BlockingIOError as exc:
             raise ReviewError('another runner owns this output') from exc
         return run_locked(tasks, binding, repo, out, reference, config, lock_root, fd, diagnostics, prepared,
-                          max_verifier_tasks)
+                          max_verifier_tasks, (hidden, exposed))
     finally:
         os.close(fd)
 
@@ -269,7 +290,8 @@ def validation_input(candidate):
 
 
 def run_locked(tasks, binding, repo, out, reference, config, lock_root, output_fd, diagnostics, prepared,
-               max_verifier_tasks=None):
+               max_verifier_tasks=None, boundary=((), ())):
+    hidden, exposed = boundary
     binding_path = out / 'run.json'
     if binding_path.exists():
         require(read_json(binding_path) == binding, 'run inputs changed; use a new output directory')
@@ -282,11 +304,13 @@ def run_locked(tasks, binding, repo, out, reference, config, lock_root, output_f
     require(not any((out / 'work').iterdir()), 'unexpected legacy work; use a fresh output directory')
     private_run = within(diagnostics, sha256(str(out).encode())[:24])
     private_run.mkdir(mode=0o700, exist_ok=True)
+    # Prove the boundary once with the base exposures; each worker then gets a
+    # prefix that additionally exposes only its own inputs.
     isolation_error = None
     try:
-        worker_prefix = verified_worker_prefix(diagnostics, (repo, reference, out, prepared))
+        verified_worker_prefix(diagnostics, (repo, reference, out, prepared), hidden, exposed, out / 'work')
     except AttemptError as exc:
-        worker_prefix, isolation_error = [], exc
+        isolation_error = exc
     mutex = threading.Lock()
     states = {'discovery': {t['task_id']: 'queued' for t in tasks}, 'verifier': {}}
     failures = {}
@@ -348,8 +372,11 @@ def run_locked(tasks, binding, repo, out, reference, config, lock_root, output_f
                 if isolation_error:
                     raise isolation_error
                 executable = Path(binary).resolve()
-                require(not any(executable.is_relative_to(p.resolve()) for p in (repo, reference, prepared, out)),
-                        'CLI is inside source/reference/prepared/output directories')
+                require(not any(executable.is_relative_to(p.resolve()) for p in (repo, reference, prepared, out, *hidden)),
+                        'CLI is inside source/reference/prepared/output/hidden directories')
+                # Discovery sees source, references and prepared inputs; a verifier
+                # sees source, references and its own validation input only.
+                worker_prefix = isolation_prefix(diagnostics, hidden, exposed if readable is None else readable)
                 work = Path(tempfile.mkdtemp(prefix='review-session-'))
                 at_stage('scheduler')
                 with SlotPool(Path(lock_root), lane).acquire() as slot:
@@ -485,10 +512,12 @@ def main():
     parser.add_argument('--diagnostics-root', type=Path, default=default_root())
     parser.add_argument('--max-verifier-tasks', type=int,
                         help='refuse to start the verifier when more candidates were admitted')
+    parser.add_argument('--hide', action='append', dest='hide', type=Path, default=[],
+                        help='additional tree to mask from every worker (the run parent is always masked)')
     args = parser.parse_args()
     try:
         return run(args.prepared, args.mode, args.out, args.reference, args.queue,
-                   diagnostics_root=args.diagnostics_root, max_verifier_tasks=args.max_verifier_tasks)
+                   diagnostics_root=args.diagnostics_root, max_verifier_tasks=args.max_verifier_tasks, hide=args.hide)
     except (ReviewError, OSError, ValueError) as exc:
         print(f'FAIL runner: {exc}', file=sys.stderr)
         return 1
