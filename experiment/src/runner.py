@@ -70,12 +70,15 @@ def gate_failures(assessment, gates, kinds=None):
     verdict carries `kind_fit` instead.
     """
     kind = assessment['defect_kind'] in kinds if kinds is not None else assessment['kind_fit']
+    # A verifier verdict that offers no fix (blank fix_patch) is not scored on fix size: a non-defect rejection
+    # need not invent a patch. A confirmed verdict still has to supply the patch (checked in validate_answer).
+    no_fix = kinds is None and not str(assessment.get('fix_patch', '')).strip()
     holds = {'wg_fit': assessment['wg_fit'] is True,
              'defect_kind': kind is True,
              'intention_clear': assessment['intention_clear'] is True,
              'impact_reachable': assessment['impact_reachable'] is True,
-             'files_touched': 1 <= assessment['files_touched'] <= gates['max_files_touched'],
-             'fix_logic_lines': 1 <= assessment['fix_logic_lines'] <= gates['max_fix_logic_lines'],
+             'files_touched': no_fix or 1 <= assessment['files_touched'] <= gates['max_files_touched'],
+             'fix_logic_lines': no_fix or 1 <= assessment['fix_logic_lines'] <= gates['max_fix_logic_lines'],
              'fix_unique': assessment['fix_unique'] is True,
              'defect_confidence': assessment['defect_confidence'] >= gates['min_confidence'],
              'remedy_confidence': assessment['remedy_confidence'] >= gates['min_confidence']}

@@ -230,7 +230,10 @@ blind, writes the single fix as a unified diff in `fix_patch`, and returns
 confirmed (every gate holds at 5/5 and the patch changes exactly the candidate
 file within the logic-line bound), rejected (with `failed_gates`), or
 needs-validation. A verdict whose status disagrees with its own gate fields is
-an invalid result and is retried like any other session failure. A verdict is
+an invalid result and is retried like any other session failure. A rejection
+that offers no fix leaves `fix_patch` empty with `files_touched` and
+`fix_logic_lines` at 0; those two gates are then not scored, while a confirmed
+verdict always needs its patch. A verdict is
 not runtime reproduction evidence.
 
 Pass `--max-verifier-tasks N` to refuse starting the serial verifier when more

@@ -264,7 +264,7 @@ class ModelCLITests(unittest.TestCase):
         discovery = (ROOT / "experiment/prompts/discovery.txt").read_text()
         verifier = (ROOT / "experiment/prompts/verifier.txt").read_text()
         self.assertLessEqual(len(discovery.encode()), 3000)
-        self.assertLessEqual(len(verifier.encode()), 2650)
+        self.assertLessEqual(len(verifier.encode()), 2900)
         gates = ("ROUTING WG FIT IS REQUIRED", "ONLY ELEMENTARY, LOCALIZED", "ONE OBVIOUS DETERMINISTIC FIX",
                  "VALIDITY FIRST", "A REAL DEFECT THAT FAILS ANY GATE")
         for name, prompt in (("discovery", discovery), ("verifier", verifier)):
@@ -290,6 +290,10 @@ class ModelCLITests(unittest.TestCase):
         self.assertIn("When in doubt, reject", verifier)
         # Uniqueness is only credible when the grader names and dismisses the alternatives a maintainer could defend.
         self.assertIn("name the alternatives a maintainer could defend", verifier)
+        # The runner refuses a verdict whose failed_gates disagree with its fields; the listing rule must be mechanical,
+        # and a non-defect rejection must be told it may leave the fix fields empty.
+        for phrase in ("defect_confidence or remedy_confidence below 5", "With no fix, leave fix_patch empty"):
+            self.assertIn(phrase, verifier)
         self.assertNotIn("traces", verifier)
 
 

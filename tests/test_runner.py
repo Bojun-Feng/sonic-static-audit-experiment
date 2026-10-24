@@ -692,5 +692,38 @@ sys.exit(runner.main())
             self.run_review()
 
 
+
+class VerdictShapeTests(unittest.TestCase):
+    """The consistency rule must accept a non-defect rejection that offers no fix, keep refusing unlisted
+    failing gates, and still demand the patch for confirmed."""
+
+    def verdict(self, **overrides):
+        value = {"status": "rejected", "rationale": "Not a defect: no producer emits such a key.",
+                 "failed_gates": ["impact_reachable", "defect_confidence", "remedy_confidence"],
+                 "wg_fit": True, "kind_fit": True, "intention_clear": True, "impact_reachable": False,
+                 "fix_patch": "", "fix_logic_lines": 0, "files_touched": 0, "fix_unique": True,
+                 "defect_confidence": 1, "remedy_confidence": 2}
+        value.update(overrides)
+        return value
+
+    def test_rejection_without_a_fix_is_consistent_but_confirmation_still_needs_a_patch(self):
+        from review_queue import runner_config
+        from runner import validate_answer
+        config, task = runner_config(), {"path": "src/route0.cpp"}
+        validate_answer(self.verdict(), Path("."), "verifier", task, config)
+        validate_answer(self.verdict(files_touched=1), Path("."), "verifier", task, config)
+        patch = "--- a/src/route0.cpp\n+++ b/src/route0.cpp\n@@ -2 +2 @@\n-auto x = key.find(\"Vrf\");\n+auto x = key == \"Vrf\";\n"
+        for case, bad in (("unlisted confidence", self.verdict(defect_confidence=4, failed_gates=["impact_reachable", "remedy_confidence"])),
+                          ("confirmed without patch", self.verdict(status="confirmed", failed_gates=[], impact_reachable=True,
+                                                                   defect_confidence=5, remedy_confidence=5)),
+                          ("patch offered but lines uncounted", self.verdict(fix_patch=patch, files_touched=1, fix_logic_lines=0)),
+                          ("no fix listed as a failed gate", self.verdict(failed_gates=["impact_reachable", "defect_confidence",
+                                                                                           "remedy_confidence", "fix_logic_lines"]))):
+            with self.subTest(case=case), self.assertRaises(ReviewError):
+                validate_answer(bad, Path("."), "verifier", task, config)
+        good = self.verdict(status="confirmed", failed_gates=[], impact_reachable=True, defect_confidence=5,
+                            remedy_confidence=5, fix_patch=patch, files_touched=1, fix_logic_lines=2)
+        validate_answer(good, Path("."), "verifier", task, config)
+
 if __name__ == "__main__":
     unittest.main()
