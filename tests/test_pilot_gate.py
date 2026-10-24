@@ -44,6 +44,10 @@ class PilotGateTests(unittest.TestCase):
             self.assertTrue(run['checks']['independence']['pass'])
         self.assertFalse(evaluate(runs, positives=[], negatives=[], max_candidates=1, max_admitted_ratio=0.75)['passed'])
         self.assertFalse(evaluate(runs, positives=[], negatives=[], max_candidates=4, max_admitted_ratio=0.1)['passed'])
+        # The ratio is opt-in: the absolute per-run count is the mandatory candidate gate.
+        unbounded = evaluate(runs, positives=[], negatives=[], max_candidates=4)
+        self.assertTrue(unbounded['passed'], unbounded['checks'])
+        self.assertIn('ratio=0.40', unbounded['checks']['candidate_count']['detail'])
         self.assertFalse(evaluate(runs, positives=[negative], negatives=[], max_candidates=4, max_admitted_ratio=0.75)['passed'])
         self.assertFalse(evaluate(runs, positives=[], negatives=[positive], max_candidates=4, max_admitted_ratio=0.75)['passed'])
         self.assertFalse(evaluate(runs, positives=[], negatives=[], max_candidates=4, max_admitted_ratio=0.75,
@@ -59,22 +63,43 @@ class PilotGateTests(unittest.TestCase):
             self.assertEqual(main(), 1)
         self.assertIn('FAIL', stdout.getvalue())
 
-    def test_gate_fails_an_incomplete_run_and_refuses_changed_artifacts(self):
+    def test_discovery_losses_need_an_explicit_allowance_and_unit_coverage(self):
         from pilot_gate import evaluate
+        # One model loses one unit terminally; the other model still covers that unit.
         self.scenario({'codex': {'src/route0.cpp': {'candidates': [test_runner.finding('src/route0.cpp')]},
                                  'gpt-6-astra:src/route3.cpp': {'always': 'exit'}}})
         self.assertEqual(self.run_review(), 1)
         out = self.base / 'exhaustive-run'
-        report = evaluate([out], positives=[], negatives=[], max_candidates=4, max_admitted_ratio=1.0)
-        self.assertFalse(report['passed'])
-        (run,) = report['runs'].values()
+        strict = evaluate([out], positives=[], negatives=[], max_candidates=4)
+        self.assertFalse(strict['passed'])
+        (run,) = strict['runs'].values()
         self.assertFalse(run['checks']['integrity']['pass'])
+        self.assertIn('discovery_failed=1', run['checks']['integrity']['detail'])
+        self.assertIn('uncovered_units=0', run['checks']['integrity']['detail'])
         self.assertEqual(run['counts']['discovery_failed'], 1)
         self.assertTrue(run['checks']['independence']['pass'])
+        allowed = evaluate([out], positives=[], negatives=[], max_candidates=4, max_discovery_failures=1)
+        self.assertTrue(allowed['passed'], allowed['checks'])
+        self.assertEqual(allowed['runs'][str(out.resolve())]['state'], 'failed')
+        # Both models lose the same unit: no allowance can cover a unit nobody reviewed.
+        self.scenario({'codex': {'src/route3.cpp': {'always': 'exit'}}})
+        self.assertEqual(self.run_review('targeted'), 1)
+        uncovered = evaluate([self.base / 'targeted-run'], positives=[], negatives=[], max_candidates=4,
+                             max_discovery_failures=2)
+        self.assertFalse(uncovered['passed'])
+        (run,) = uncovered['runs'].values()
+        self.assertIn('uncovered_units=1', run['checks']['integrity']['detail'])
+
+    def test_gate_refuses_changed_artifacts(self):
+        from pilot_gate import evaluate
+        self.scenario({'codex': {'src/route0.cpp': {'candidates': [test_runner.finding('src/route0.cpp')]}}})
+        self.assertEqual(self.run_review(), 0)
+        out = self.base / 'exhaustive-run'
+        self.assertTrue(evaluate([out], positives=[], negatives=[], max_candidates=4)['passed'])
         prompt = next((out / 'results/verifier').glob('*/prompt.txt'))
         prompt.write_text(prompt.read_text() + '\nprior_candidates: []\n')
         with self.assertRaises(ReviewError):
-            evaluate([out], positives=[], negatives=[], max_candidates=4, max_admitted_ratio=1.0)
+            evaluate([out], positives=[], negatives=[], max_candidates=4)
 
 
 if __name__ == '__main__':

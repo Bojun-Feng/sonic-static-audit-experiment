@@ -51,7 +51,7 @@ def sibling_reads(trace, own):
     return found
 
 
-def evaluate_run(root, max_candidates, max_admitted_ratio, gates):
+def evaluate_run(root, max_candidates, max_admitted_ratio, max_discovery_failures, gates):
     root = Path(root).resolve()
     fd = os.open(within(root, 'runner.lock'), os.O_RDONLY | os.O_NOFOLLOW)
     try:
@@ -63,6 +63,7 @@ def evaluate_run(root, max_candidates, max_admitted_ratio, gates):
     finally:
         os.close(fd)
     status = json.loads(files['status.json'])
+    tasks = json.loads(files['run.json'])['tasks']
     checks = {}
 
     def check(name, passed, detail):
@@ -70,8 +71,21 @@ def evaluate_run(root, max_candidates, max_admitted_ratio, gates):
 
     residue = [p.name for p in within(root, 'work').iterdir()]
     notices = len(files['notifications.jsonl'].decode().splitlines()) if 'notifications.jsonl' in files else 0
-    check('integrity', status['state'] == 'complete' and not residue,
-          f"state={status['state']} notices={notices} work_residue={len(residue)}")
+    candidates = {name.split('/')[2]: json.loads(data) for name, data in files.items()
+                  if name.startswith('results/candidates/') and name.endswith('/candidate.json')}
+    # A lost discovery session (the runner never publishes failed attempts) costs
+    # coverage, not evidence quality. It is tolerated only within an explicit
+    # allowance and only while every unit keeps at least one published session;
+    # the verifier lane itself must be complete.
+    covered = {task['unit_id'] for task in tasks if f"results/discovery/{task['task_id']}/result.json" in files}
+    uncovered = {task['unit_id'] for task in tasks} - covered
+    verifier_complete = status['verifier']['failed'] == 0 and status['verifier']['succeeded'] == len(candidates)
+    check('integrity', not residue and verifier_complete and not uncovered
+          and status['discovery']['failed'] <= max_discovery_failures,
+          f"state={status['state']} discovery_failed={status['discovery']['failed']} allowance={max_discovery_failures} "
+          f"uncovered_units={len(uncovered)} verifier_failed={status['verifier']['failed']} "
+          f"verifier_succeeded={status['verifier']['succeeded']}/{len(candidates)} notices={notices} "
+          f"work_residue={len(residue)}")
     findings = [finding for name, data in files.items()
                 if name.startswith('results/discovery/') and name.endswith('/result.json')
                 for finding in json.loads(data)['candidates']]
@@ -79,8 +93,6 @@ def evaluate_run(root, max_candidates, max_admitted_ratio, gates):
     screened = json.loads(files['results/screened.json']) if 'results/screened.json' in files else None
     check('gate_fields', not missing and screened is not None and all(s['failed_gates'] for s in screened),
           f'findings={len(findings)} missing_gate_fields={len(missing)} screened_file={screened is not None}')
-    candidates = {name.split('/')[2]: json.loads(data) for name, data in files.items()
-                  if name.startswith('results/candidates/') and name.endswith('/candidate.json')}
     validations = {name.split('/')[2]: json.loads(data) for name, data in files.items()
                    if name.startswith('results/validation/') and name.endswith('/validation-input.json')}
     verdicts = {name.split('/')[2]: json.loads(data) for name, data in files.items()
@@ -91,8 +103,11 @@ def evaluate_run(root, max_candidates, max_admitted_ratio, gates):
               'confirmed': sum(v['status'] == 'confirmed' for v in verdicts.values()),
               'rejected': sum(v['status'] == 'rejected' for v in verdicts.values()),
               'needs_validation': sum(v['status'] == 'needs-validation' for v in verdicts.values())}
+    # The absolute per-run count is the spend gate; the admitted/raw ratio depends
+    # on how positive-heavy the queue is, so it is enforced only when requested.
     ratio = len(candidates) / len(findings) if findings else 0.0
-    check('candidate_count', len(candidates) <= max_candidates and ratio <= max_admitted_ratio,
+    check('candidate_count', len(candidates) <= max_candidates
+          and (max_admitted_ratio is None or ratio <= max_admitted_ratio),
           f'admitted={len(candidates)} raw={len(findings)} ratio={ratio:.2f} '
           f'max_candidates={max_candidates} max_ratio={max_admitted_ratio}')
     malformed = []
@@ -136,11 +151,13 @@ def evaluate_run(root, max_candidates, max_admitted_ratio, gates):
     return {'state': status['state'], 'counts': counts, 'checks': checks, 'confirmed_paths': confirmed_paths}
 
 
-def evaluate(runs, positives, negatives, max_candidates, max_admitted_ratio, max_cost_usd=None):
+def evaluate(runs, positives, negatives, max_candidates, max_admitted_ratio=None, max_cost_usd=None,
+             max_discovery_failures=0):
     gates = runner_config()['gates']
     report = {'runs': {}, 'totals': {}, 'checks': {}, 'controls': {}}
     for run in runs:
-        report['runs'][str(Path(run).resolve())] = evaluate_run(run, max_candidates, max_admitted_ratio, gates)
+        report['runs'][str(Path(run).resolve())] = evaluate_run(run, max_candidates, max_admitted_ratio,
+                                                                 max_discovery_failures, gates)
     results = list(report['runs'].values())
     for key in ('discovery_succeeded', 'discovery_failed', 'raw_findings', 'screened', 'candidate_count',
                 'verifier_succeeded', 'verifier_failed', 'confirmed', 'rejected', 'needs_validation'):
@@ -170,14 +187,17 @@ def main():
                         help='path expected to yield at least one confirmed verdict')
     parser.add_argument('--negative', action='append', dest='negatives', default=[],
                         help='path expected to yield no confirmed verdict')
-    parser.add_argument('--max-candidates', type=int, default=12, help='per run')
-    parser.add_argument('--max-admitted-ratio', type=float, default=0.5, help='admitted candidates over raw findings, per run')
+    parser.add_argument('--max-candidates', type=int, default=12, help='admitted candidates per run')
+    parser.add_argument('--max-admitted-ratio', type=float,
+                        help='optional cap on admitted candidates over raw findings, per run')
+    parser.add_argument('--max-discovery-failures', type=int, default=0,
+                        help='terminal discovery failures tolerated per run while every unit stays covered')
     parser.add_argument('--max-cost-usd', type=float)
     parser.add_argument('--out', type=Path, help='JSON report path')
     args = parser.parse_args()
     try:
         report = evaluate(args.runs, args.positives, args.negatives, args.max_candidates, args.max_admitted_ratio,
-                          args.max_cost_usd)
+                          args.max_cost_usd, args.max_discovery_failures)
         if args.out:
             args.out.write_bytes(json_bytes(report))
     except (ReviewError, OSError, ValueError, KeyError, TypeError) as exc:

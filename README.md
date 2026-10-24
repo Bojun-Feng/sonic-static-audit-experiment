@@ -246,20 +246,25 @@ acceptance gate:
 ```sh
 python3 -B experiment/src/pilot_gate.py --run results/exhaustive-run --run results/targeted-run \
   --positive orchagent/known-positive.cpp --negative orchagent/known-negative.cpp \
-  --max-candidates 12 --max-admitted-ratio 0.5 --max-cost-usd 10 --out results/pilot-gate.json
+  --max-candidates 12 --max-discovery-failures 0 --max-cost-usd 10 --out results/pilot-gate.json
 ```
 
 It re-validates each run through the export inventory (hashes, exact children)
-and refuses an active run, then checks: runner integrity (`complete`, empty
-`work/`); gate fields on every published finding and `results/screened.json`
-present; the admitted candidate count and admitted/raw ratio per run against
-the caps; the fix shape of every confirmed verdict; verifier independence (no
-prior verdicts, sibling candidates, discovery evidence, or trace paths in any
-verifier prompt or tool input, validation inputs limited to their allowed
-fields, prompt sizes within 2 KB of each other); the positive/negative control
-paths; and the verifier cost. It prints PASS or FAIL per check, writes the JSON
-report, and exits nonzero on any failure. A failed gate means tune the prompts,
-use a new output directory, and re-pilot; do not start production.
+and refuses an active run, then checks: runner integrity (empty `work/`, every
+candidate verified with no verifier failure, every review unit covered by at
+least one published discovery session, and terminal discovery failures within
+the explicit `--max-discovery-failures` allowance, default 0); gate fields on
+every published finding and `results/screened.json` present; the admitted
+candidate count per run against `--max-candidates` (and, only when
+`--max-admitted-ratio` is given, admitted over raw findings, which depends on
+how positive-heavy the queue is); the fix shape of every confirmed verdict;
+verifier independence (no prior verdicts, sibling candidates, discovery
+evidence, or trace paths in any verifier prompt or tool input, validation
+inputs limited to their allowed fields, prompt sizes within 2 KB of each
+other); the positive/negative control paths; and the verifier cost. It prints
+PASS or FAIL per check, writes the JSON report, and exits nonzero on any
+failure. A failed gate means tune the prompts or controls, use a new output
+directory, and re-pilot; do not start production.
 
 To select six **previously failed** review units, use only the historical full
 run's `notifications.jsonl` and the new preparation; old failed traces are not
