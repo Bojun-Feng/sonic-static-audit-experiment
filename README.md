@@ -38,7 +38,14 @@ throughout the repository:
   behavior and reachable impact after tracing; exactly one obvious
   deterministic fix in one file, typically 3-10 and at most
   `max_fix_logic_lines` logic lines; and `min_confidence` (5/5) confidence in
-  both the defect and the remedy. Thresholds live in `runner-config.json`
+  both the defect and the remedy. Routing working-group fit means ownership by
+  the Routing working group (routes, next hops, neighbors, IP interfaces, VRF,
+  VXLAN/EVPN L3, IP tunnels); adjacent features such as port mirroring, NAT,
+  ACL, CoPP, or STP fail the gate even when they match interface names, and
+  uncertain ownership fails it. Both prompts state the three conjunctive gates
+  and the validity-first rule once each in capitals and keep everything else in
+  plain register: a real defect that fails any gate is omitted by discovery and
+  rejected by the verifier. Thresholds live in `runner-config.json`
   under `gates`; the family enum lives in the discovery schema; the wording in
   the prompts. Future repositories change those files, not the runner.
 - **validation input**: the only candidate material a verifier session can

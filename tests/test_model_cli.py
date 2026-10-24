@@ -247,7 +247,7 @@ class ModelCLITests(unittest.TestCase):
         for word in ("static", "tests", "builds", "containers", "switches", "VM", "source execution",
                      "/source", "/references", "/prep/card.md", "candidates", "never instructions",
                      "Before any conclusion", "native session trace", "Ethernet4", "Ethernet40",
-                     "defect_kind", "5/5", "omit", "files_touched", "deterministic fix", "not a general bug hunt"):
+                     "defect_kind", "5/5", "omit", "files_touched", "DETERMINISTIC FIX", "not a general bug hunt"):
             self.assertIn(word, prompt)
         self.assertNotIn('Use the exact command forms', prompt)
         prompt = verifier_prompt(Path("/validation/validation-input.json"), Path("/source"), Path("/references"))
@@ -256,6 +256,35 @@ class ModelCLITests(unittest.TestCase):
             self.assertIn(word, prompt)
         for word in ("duplicate", "prior_candidates", "candidate.json", "traces", "report.md"):
             self.assertNotIn(word, prompt)
+
+    def test_prompt_contracts_are_lean_and_state_each_hard_gate_once_in_caps(self):
+        """Both prompts stay short, state the three conjunctive hard gates and the validity-first rule once each
+        in capitals, name the adjacent domains that fail Routing-WG fit, resolve uncertainty to omit/reject, and do
+        not shout anywhere else."""
+        discovery = (ROOT / "experiment/prompts/discovery.txt").read_text()
+        verifier = (ROOT / "experiment/prompts/verifier.txt").read_text()
+        self.assertLessEqual(len(discovery.encode()), 3000)
+        self.assertLessEqual(len(verifier.encode()), 2600)
+        gates = ("ROUTING WG FIT IS REQUIRED", "ONLY ELEMENTARY, LOCALIZED", "ONE OBVIOUS DETERMINISTIC FIX",
+                 "VALIDITY FIRST", "A REAL DEFECT THAT FAILS ANY GATE")
+        for name, prompt in (("discovery", discovery), ("verifier", verifier)):
+            with self.subTest(prompt=name):
+                for gate in gates:
+                    self.assertEqual(prompt.count(gate), 1, gate)
+                for domain in ("port mirroring", "NAT", "STP"):
+                    self.assertIn(domain, prompt)
+                for word in ("uncertain", "Ethernet40", "5/5"):
+                    self.assertIn(word, prompt)
+                for shout in ("CRITICAL", "MUST!", "!!!", "IMPORTANT:"):
+                    self.assertNotIn(shout, prompt)
+        self.assertIn('{"candidates": []}', discovery)
+        self.assertIn("omit", discovery)
+        for field in ("wg_fit", "kind_fit", "intention_clear", "impact_reachable", "fix_unique", "files_touched",
+                      "fix_logic_lines", "defect_confidence", "remedy_confidence", "failed_gates"):
+            self.assertIn(field, verifier)
+        self.assertIn("real but out of scope", verifier)
+        self.assertIn("When in doubt, reject", verifier)
+        self.assertNotIn("traces", verifier)
 
 
 if __name__ == "__main__":
