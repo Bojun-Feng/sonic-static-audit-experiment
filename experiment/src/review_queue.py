@@ -15,7 +15,7 @@ EXPERIMENT = Path(__file__).resolve().parents[1]
 def runner_config():
     value = read_json(EXPERIMENT / "runner-config.json")
     keys(value, ["schema_version", "discovery_models", "verifier_model", "discovery_slots",
-                 "verifier_slots", "max_attempts", "timeout_seconds"], "runner config")
+                 "verifier_slots", "max_attempts", "timeout_seconds", "gates"], "runner config")
     require(value["schema_version"] == 1
             and value["discovery_models"] == ["gpt-6-astra", "gpt-5.6-sol"]
             and value["verifier_model"] == "claude-opus-5-5"
@@ -24,6 +24,13 @@ def runner_config():
             "runner models and global concurrency must match production")
     require(all(type(value[k]) is int and value[k] > 0 for k in ("max_attempts", "timeout_seconds")),
             "runner attempts and timeout must be positive integers")
+    # Hard-gate thresholds are the repository-specific part of the review family;
+    # the defect-kind enum lives in the discovery schema, the wording in the prompts.
+    gates = value["gates"]
+    keys(gates, ["max_files_touched", "max_fix_logic_lines", "min_confidence"], "hard gates")
+    require(all(type(gates[k]) is int for k in gates) and gates["max_files_touched"] >= 1
+            and gates["max_fix_logic_lines"] >= 1 and 1 <= gates["min_confidence"] <= 5,
+            "hard gate thresholds must be positive integers with confidence between 1 and 5")
     return value
 
 

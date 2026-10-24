@@ -5,7 +5,7 @@ usage() {
     cat <<'EOF'
 Usage:
   run-experiment.sh prepare {exhaustive|targeted} [--repo DIR] [--out DIR] [--config FILE] [--identity FILE]
-  run-experiment.sh run {exhaustive|targeted} --reference DIR [--prepared DIR] [--out DIR] [--queue FILE] [--diagnostics-root DIR]
+  run-experiment.sh run {exhaustive|targeted} --reference DIR [--prepared DIR] [--out DIR] [--queue FILE] [--diagnostics-root DIR] [--max-verifier-tasks N]
 Prepare performs local static selection only. Run invokes standalone model CLIs.
 Defaults: sibling sonic-swss source, results/MODE prepared inputs, results/MODE-run output.
 EOF
@@ -34,14 +34,15 @@ reference=''
 identity=''
 queue=''
 diagnostics=''
+verifier_cap=''
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --repo|--out|--config|--identity|--prepared|--reference|--queue|--diagnostics-root)
+        --repo|--out|--config|--identity|--prepared|--reference|--queue|--diagnostics-root|--max-verifier-tasks)
             [[ $# -ge 2 && -n $2 && $2 != --* ]] || fail "$1 requires a value"
             case "$1" in
                 --repo|--config|--identity) [[ $action == prepare ]] || fail "$1 is only valid for prepare" ;;
-                --prepared|--reference|--queue|--diagnostics-root) [[ $action == run ]] || fail "$1 is only valid for run" ;;
+                --prepared|--reference|--queue|--diagnostics-root|--max-verifier-tasks) [[ $action == run ]] || fail "$1 is only valid for run" ;;
             esac
             case "$1" in
                 --repo) repo=$2 ;;
@@ -52,6 +53,7 @@ while [[ $# -gt 0 ]]; do
                 --reference) reference=$2 ;;
                 --queue) queue=$2 ;;
                 --diagnostics-root) diagnostics=$2 ;;
+                --max-verifier-tasks) verifier_cap=$2 ;;
             esac
             shift 2
             ;;
@@ -66,6 +68,7 @@ if [[ $action == run ]]; then
     args=(--prepared "$prepared" --mode "$mode" --out "$out" --reference "$reference")
     [[ -z $queue ]] || args+=(--queue "$queue")
     [[ -z $diagnostics ]] || args+=(--diagnostics-root "$diagnostics")
+    [[ -z $verifier_cap ]] || args+=(--max-verifier-tasks "$verifier_cap")
     exec python3 -B "$script_dir/src/runner.py" "${args[@]}"
 fi
 args=(--repo "$repo" --config "$config" --out "$out" --mode "$mode")

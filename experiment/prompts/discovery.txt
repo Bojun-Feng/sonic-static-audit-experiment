@@ -11,9 +11,25 @@ home directories, CLI configuration, or unrelated files. Do not use Git commands
 Read the indicated source file, relevant callers and definitions in source, and
 reference material as needed. Exhaustive mode reviews the whole indicated file.
 Targeted mode starts with the source card's matches and scope, then follows
-relevant source context. Focus on routing/interface correctness, prefix versus
-exact matching, structured-key parsing, and concrete consequential defects.
-The selector's matches are review hints, not findings.
+relevant source context. The selector's matches are review hints, not findings.
+
+This is a narrow static correctness review, not a general bug hunt. Report only
+defects of one family: an elementary, localized identity-versus-prefix or
+structured-key matching mistake, or a directly analogous typo or obvious edge
+case, in code that selects, keys, or matches routing, interface, neighbor,
+next-hop, VRF, VLAN, VXLAN, or tunnel entities (Routing working-group fit).
+Reference example: an interface name compared by prefix or substring (find,
+compare(0, n), strncmp, substr, starts_with, or the wrong tokenize component)
+so that Ethernet4 also matches Ethernet40. Analogous forms: the wrong token
+index, a missing delimiter guard, key[0] where keys[0] was meant.
+Every candidate must pass all hard gates: Routing WG fit; one of the schema's
+defect_kind values; intended behavior and reachable impact demonstrably clear
+after tracing callers and guards; exactly one obvious deterministic fix in one
+file, typically 3-10 logic lines and never more than 50; and 5/5 confidence in
+both the defect and the fix. Reject and omit architectural, concurrency, timing,
+multi-file, ambiguous, broad, general, speculative, or high-level issues, style
+or robustness concerns, and anything with more than one defensible fix. When in
+doubt, omit: report nothing rather than a candidate below 5/5.
 
 Before any conclusion (including no candidates), inspect the assigned file and
 relevant source context using native read-only command tools. Retain source
@@ -30,7 +46,10 @@ review.
 Return only the JSON object required by the schema. Raise candidates only when
 you can identify a concrete defect, a reachable triggering scenario, and source
 evidence. Each candidate needs its relative source path, narrow inclusive line
-range, title, root_cause, evidence, and impact. Include reasoning about callers
-and guards and cite source locations in evidence. Do not invent runtime results.
-Do not write report files yourself. For a clean unit return {"candidates": []};
-do not create a clean-unit report, placeholder finding, or speculative candidate.
+range, title, root_cause, evidence, impact, and the gate fields: defect_kind,
+wg_fit, intended_behavior, intention_clear, impact_reachable, fix_summary (the
+single fix), fix_logic_lines, files_touched, fix_unique, defect_confidence, and
+remedy_confidence. Include reasoning about callers and guards and cite source
+locations in evidence. Do not invent runtime results. Do not write report files
+yourself. For a clean unit return {"candidates": []}; do not create a clean-unit
+report, placeholder finding, or speculative candidate.

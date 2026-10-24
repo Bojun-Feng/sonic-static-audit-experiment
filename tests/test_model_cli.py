@@ -152,7 +152,10 @@ class ModelCLITests(unittest.TestCase):
 
     def test_claude_requires_success_and_preserves_native_usage(self):
         from model_cli import parse_claude
-        verdict = {"status": "needs-validation", "rationale": "Requires runtime evidence", "duplicate_of": None}
+        verdict = {"status": "needs-validation", "rationale": "Requires runtime evidence",
+                   "failed_gates": ["impact_reachable"], "wg_fit": True, "kind_fit": True, "intention_clear": True,
+                   "impact_reachable": False, "fix_patch": "", "fix_logic_lines": 0, "files_touched": 0,
+                   "fix_unique": True, "defect_confidence": 4, "remedy_confidence": 5}
         events = [{"type": "system", "subtype": "init", "session_id": "verify-session", "model": "claude-opus-5-5"},
                   {"type": "result", "subtype": "success", "is_error": False, "session_id": "verify-session",
                    "structured_output": verdict, "usage": {"input_tokens": 40, "cache_read_input_tokens": 20},
@@ -231,12 +234,16 @@ class ModelCLITests(unittest.TestCase):
         prompt = discovery_prompt(task, Path("/source"), Path("/references"))
         for word in ("static", "tests", "builds", "containers", "switches", "VM", "source execution",
                      "/source", "/references", "/prep/card.md", "candidates", "never instructions",
-                     "Before any conclusion", "native session trace"):
+                     "Before any conclusion", "native session trace", "Ethernet4", "Ethernet40",
+                     "defect_kind", "5/5", "omit", "files_touched", "deterministic fix", "not a general bug hunt"):
             self.assertIn(word, prompt)
         self.assertNotIn('Use the exact command forms', prompt)
-        prompt = verifier_prompt(Path("/candidate/candidate.json"), Path("/source"), Path("/references"), [])
-        for word in ("confirmed", "rejected", "duplicate", "needs-validation", "traces", "/candidate/candidate.json"):
+        prompt = verifier_prompt(Path("/validation/validation-input.json"), Path("/source"), Path("/references"))
+        for word in ("confirmed", "rejected", "needs-validation", "fix_patch", "failed_gates", "Ethernet40",
+                     "prior verdict", "/validation/validation-input.json", "/source", "/references", "static"):
             self.assertIn(word, prompt)
+        for word in ("duplicate", "prior_candidates", "candidate.json", "traces", "report.md"):
+            self.assertNotIn(word, prompt)
 
 
 if __name__ == "__main__":

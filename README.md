@@ -2,12 +2,15 @@
 
 A static correctness review experiment for SONiC SWSS source: a local preparation
 step and a model runner with a routing/interface profile. It compares two ways of
-using LLM coding sessions to review C++ for ordinary correctness defects (for
-example, `Ethernet4` wrongly matching `Ethernet40` through a prefix comparison):
-an **exhaustive** queue of relevant production files and a **targeted** queue of
-prefix/partial-match and structured-key candidates. Preparation generates and
-validates artifacts. The explicit `run` command performs model discovery and
-independent candidate verification.
+using LLM coding sessions to review C++ for one narrow family of correctness
+defects: elementary, localized identity-versus-prefix or structured-key matching
+mistakes (for example, `Ethernet4` wrongly matching `Ethernet40` through a prefix
+comparison) and directly analogous typos or obvious edge cases in routing and
+interface code. It runs an **exhaustive** queue of relevant production files and
+a **targeted** queue of prefix/partial-match and structured-key candidates.
+Preparation generates and validates artifacts. The explicit `run` command
+performs model discovery, deterministic hard-gate screening, and blinded
+independent candidate validation.
 
 Requirements: Python 3.10+ (standard library only), Bash, and an existing source
 checkout. `ast-grep` is optional. Preparation performs no installation. The separate
@@ -18,13 +21,30 @@ Lima bootstrap installs the pinned model CLIs only when explicitly run with `--c
 This is a static correctness review experiment; the wording below is used
 throughout the repository:
 
-- **review** / **correctness review**: reading SONiC SWSS source for ordinary
-  correctness defects. A **review unit** is one assigned file (exhaustive mode)
-  or one source-card group (targeted mode).
-- **finding** / **candidate defect**: an issue reported by a discovery model.
-  Findings with the same location and normalized root cause are combined into
-  one candidate, and the verifier returns a **verdict**: confirmed, rejected,
-  duplicate, or needs-validation.
+- **review** / **correctness review**: reading SONiC SWSS source for the one
+  narrow family of correctness defects described above, under hard gates. A
+  **review unit** is one assigned file (exhaustive mode) or one source-card
+  group (targeted mode).
+- **finding** / **candidate defect**: an issue reported by a discovery model,
+  together with its self-assessment against the hard gates. A **screened
+  finding** fails a deterministic gate check and is recorded in
+  `results/screened.json` without any verifier session. **Admitted** findings
+  on the same path and defect kind with overlapping line ranges are combined
+  into one **candidate**; each candidate gets one blinded verifier session
+  whose **verdict** is confirmed, rejected, or needs-validation.
+- **hard gates**: Routing working-group fit; a closed `defect_kind` family
+  (identity-versus-prefix, substring, structured-key component, delimiter
+  boundary, identity typo, exact-match edge case); demonstrably clear intended
+  behavior and reachable impact after tracing; exactly one obvious
+  deterministic fix in one file, typically 3-10 and at most
+  `max_fix_logic_lines` logic lines; and `min_confidence` (5/5) confidence in
+  both the defect and the remedy. Thresholds live in `runner-config.json`
+  under `gates`; the family enum lives in the discovery schema; the wording in
+  the prompts. Future repositories change those files, not the runner.
+- **validation input**: the only candidate material a verifier session can
+  read, `results/validation/ID/validation-input.json`: location, defect kind,
+  and one-line claims. It never contains discovery evidence, confidences, fix
+  summaries, model names, trace paths, or other verdicts.
 - **scope** / **constraints**: what a session may read and run (static, read-only
   inspection only). **Evidence** is the retained read-only commands and output
   that a trace must contain.
@@ -173,11 +193,31 @@ counted as reviewed units or clean findings. Use a new output directory for a
 fresh run with the revised prompt; existing run bindings reject prompt changes.
 
 Actual findings produce `results/candidates/ID/candidate.json` and `report.md`;
-clean units produce no Markdown report. Findings with the same source range and
-normalized root cause are combined, retaining every discovery occurrence.
-The serial verifier receives all occurrence traces and prior verdicts for
-semantic duplicate checks. Verdicts are confirmed, rejected, duplicate, or
-needs-validation. A verdict is not runtime reproduction evidence.
+clean units produce no Markdown report. Every discovery finding carries the
+gate fields (`defect_kind`, `wg_fit`, `intended_behavior`, `intention_clear`,
+`impact_reachable`, `fix_summary`, `fix_logic_lines`, `files_touched`,
+`fix_unique`, `defect_confidence`, `remedy_confidence`). Findings that fail a
+deterministic gate check are listed in `results/screened.json` with their
+failed gates and never reach the verifier. Admitted findings with the same
+path and defect kind and overlapping inclusive line ranges are combined into
+one candidate, retaining every discovery occurrence and the set of reporting
+models; agreement is aligned by location and kind, never by wording. The
+serial verifier gets a fresh session per candidate with `--add-dir` limited to
+the source, the references, and that candidate's own `results/validation/ID`
+directory; it receives no prior verdicts, sibling candidates, discovery
+evidence, or traces, so its prompt size is constant. It re-scores the gates
+blind, writes the single fix as a unified diff in `fix_patch`, and returns
+confirmed (every gate holds at 5/5 and the patch changes exactly the candidate
+file within the logic-line bound), rejected (with `failed_gates`), or
+needs-validation. A verdict whose status disagrees with its own gate fields is
+an invalid result and is retried like any other session failure. A verdict is
+not runtime reproduction evidence.
+
+Pass `--max-verifier-tasks N` to refuse starting the serial verifier when more
+than N candidates were admitted. The run stops after writing the candidates,
+validation inputs, and `results/screened.json`, reports the count, and can be
+rerun with the same output directory and a higher cap; discovery results are
+resumed, not repeated.
 
 `status.json` records queued/running/succeeded/failed counts for both lanes.
 Terminal failures append to `notifications.jsonl`; healthy tasks continue and
@@ -199,6 +239,27 @@ to exercise the shared global 16-slot discovery limit; a single twelve-session
 arm cannot saturate it. Verifier concurrency remains one across both arms.
 Supply six `--path` arguments to choose explicit paths instead of the
 first six available units. No VM operations are performed by the runner.
+
+Before any full production run, evaluate the finished pilot arms with the
+acceptance gate:
+
+```sh
+python3 -B experiment/src/pilot_gate.py --run results/exhaustive-run --run results/targeted-run \
+  --positive orchagent/known-positive.cpp --negative orchagent/known-negative.cpp \
+  --max-candidates 12 --max-admitted-ratio 0.5 --max-cost-usd 10 --out results/pilot-gate.json
+```
+
+It re-validates each run through the export inventory (hashes, exact children)
+and refuses an active run, then checks: runner integrity (`complete`, empty
+`work/`); gate fields on every published finding and `results/screened.json`
+present; the admitted candidate count and admitted/raw ratio per run against
+the caps; the fix shape of every confirmed verdict; verifier independence (no
+prior verdicts, sibling candidates, discovery evidence, or trace paths in any
+verifier prompt or tool input, validation inputs limited to their allowed
+fields, prompt sizes within 2 KB of each other); the positive/negative control
+paths; and the verifier cost. It prints PASS or FAIL per check, writes the JSON
+report, and exits nonzero on any failure. A failed gate means tune the prompts,
+use a new output directory, and re-pilot; do not start production.
 
 To select six **previously failed** review units, use only the historical full
 run's `notifications.jsonl` and the new preparation; old failed traces are not
@@ -229,7 +290,8 @@ python3 -B experiment/src/export_results.py --run /path/to/new-pilot-run --out /
 
 It requires a finished, unlocked run and checks completion inventories and
 artifact hashes. The archive includes run/status metadata, bounded notifications,
-validated success artifacts, and candidate JSON/Markdown. It never walks arbitrary
+validated success artifacts, candidate JSON/Markdown, screened findings, and
+validation inputs. It never walks arbitrary
 output subtrees or follows symlinks/hardlinks. Scratch, private diagnostics,
 locks, and unknown files are excluded. Broad historical failure notices cannot
 be exported with this helper. Do not archive a workspace with a recursive tar or

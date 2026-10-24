@@ -19,10 +19,21 @@ from common import ReviewError, json_bytes, read_json
 from source_identity import bind
 
 
-def finding(path, title="Prefix accepts wrong interface", cause="Unbounded prefix matches another key"):
-    return {"title": title, "path": path, "start_line": 2, "end_line": 2,
-            "root_cause": cause, "evidence": f"{path}:2 accepts a prefix without a delimiter guard",
-            "impact": "Wrong route selected for a conflicting interface name"}
+FIXTURE = '// route\nauto x = key.find("Vrf");\nif (x == 0) {\n    return key.substr(3);\n}\nreturn key;\n'
+
+
+def finding(path, title="Prefix accepts wrong interface", cause="Unbounded prefix matches another key",
+            start=2, end=2, kind="prefix-vs-exact", **gates):
+    """A discovery finding that passes every hard gate unless `gates` overrides a field."""
+    value = {"title": title, "path": path, "start_line": start, "end_line": end,
+             "root_cause": cause, "evidence": f"{path}:2 accepts a prefix without a delimiter guard",
+             "impact": "Wrong route selected for a conflicting interface name",
+             "defect_kind": kind, "wg_fit": True, "intended_behavior": "Only the exact interface key may match",
+             "intention_clear": True, "impact_reachable": True,
+             "fix_summary": "Compare the full key instead of its prefix", "fix_logic_lines": 3,
+             "files_touched": 1, "fix_unique": True, "defect_confidence": 5, "remedy_confidence": 5}
+    value.update(gates)
+    return value
 
 
 class RunnerTests(unittest.TestCase):
@@ -33,7 +44,7 @@ class RunnerTests(unittest.TestCase):
         self.repo = self.base / "source"
         (self.repo / "src").mkdir(parents=True)
         for i in range(6):
-            (self.repo / f"src/route{i}.cpp").write_text('// route\nauto x = key.find("Vrf");\n')
+            (self.repo / f"src/route{i}.cpp").write_text(FIXTURE)
         self.reference = self.base / "references"
         self.reference.mkdir()
         (self.reference / "notes.txt").write_text("Reference definitions for routing")
@@ -351,7 +362,7 @@ sys.exit(runner.main())
                     lock_root=self.base / 'locks', diagnostics_root=root)
         self.assertFalse((self.state / 'events.jsonl').exists())
 
-    def test_candidates_from_both_models_are_deduplicated_and_verified_serially(self):
+    def test_candidates_from_both_models_are_merged_and_verified_serially(self):
         a, b = finding("src/route0.cpp"), finding("src/route1.cpp", cause="Different parsing error")
         self.scenario({"codex": {"src/route0.cpp": {"candidates": [a]},
                                   "gpt-5.6-sol:src/route1.cpp": {"candidates": [b]}},
@@ -361,11 +372,162 @@ sys.exit(runner.main())
         candidates = [read_json(p) for p in (out / "results/candidates").glob("*/candidate.json")]
         self.assertEqual(len(candidates), 2)
         self.assertEqual(sorted(len(c["occurrences"]) for c in candidates), [1, 2])
+        self.assertEqual(sorted(len(c["models"]) for c in candidates), [1, 2])
         self.assertEqual(len(list((out / "results/candidates").glob("*/report.md"))), 2)
+        validations = [read_json(p) for p in (out / "results/validation").glob("*/validation-input.json")]
+        # Identical one-line claims from both models collapse into one claim.
+        self.assertEqual(sorted(len(v["claims"]) for v in validations), [1, 1])
         verdicts = [read_json(p) for p in (out / "results/verifier").glob("*/result.json")]
         self.assertEqual({v["status"] for v in verdicts}, {"confirmed", "needs-validation"})
+        confirmed = next(v for v in verdicts if v["status"] == "confirmed")
+        self.assertEqual(confirmed["failed_gates"], [])
+        self.assertIn("+++ ", confirmed["fix_patch"])
         events = [e for e in self.events() if e["kind"] == "claude"]
         self.assertEqual([e["event"] for e in events], ["start", "end", "start", "end"])
+
+    def test_screened_findings_never_reach_the_verifier(self):
+        self.scenario({"codex": {"src/route0.cpp": {"candidates": [finding("src/route0.cpp", defect_confidence=4)]},
+                                 "src/route1.cpp": {"candidates": [finding("src/route1.cpp", fix_logic_lines=60)]},
+                                 "src/route2.cpp": {"candidates": [finding("src/route2.cpp", files_touched=2)]},
+                                 "src/route3.cpp": {"candidates": [finding("src/route3.cpp", wg_fit=False, fix_unique=False)]},
+                                 "src/route4.cpp": {"candidates": [finding("src/route4.cpp")]}}})
+        self.assertEqual(self.run_review(), 0)
+        out = self.base / "exhaustive-run"
+        screened = read_json(out / "results/screened.json")
+        self.assertEqual(len(screened), 8)
+        self.assertEqual({(s["path"], tuple(s["failed_gates"])) for s in screened},
+                         {("src/route0.cpp", ("defect_confidence",)), ("src/route1.cpp", ("fix_logic_lines",)),
+                          ("src/route2.cpp", ("files_touched",)), ("src/route3.cpp", ("wg_fit", "fix_unique"))})
+        self.assertEqual({s["model"] for s in screened}, {"gpt-6-astra", "gpt-5.6-sol"})
+        self.assertTrue(all(set(s) == {"task_id", "model", "path", "start_line", "end_line", "title", "failed_gates"}
+                            for s in screened))
+        candidates = [read_json(p) for p in (out / "results/candidates").glob("*/candidate.json")]
+        self.assertEqual([c["path"] for c in candidates], ["src/route4.cpp"])
+        self.assertEqual(len(candidates[0]["occurrences"]), 2)
+        self.assertEqual(read_json(out / "status.json")["verifier"],
+                         {"queued": 0, "running": 0, "succeeded": 1, "failed": 0})
+        self.assertEqual([e["event"] for e in self.events() if e["kind"] == "claude"], ["start", "end"])
+
+    def test_same_defect_merges_only_on_path_kind_and_overlapping_lines(self):
+        self.scenario({"codex": {
+            "gpt-6-astra:src/route0.cpp": {"candidates": [finding("src/route0.cpp", start=2, end=3)]},
+            "gpt-5.6-sol:src/route0.cpp": {"candidates": [finding("src/route0.cpp", title="Different title",
+                                                                   cause="Different sentence", start=3, end=4)]},
+            "gpt-6-astra:src/route1.cpp": {"candidates": [finding("src/route1.cpp")]},
+            "gpt-5.6-sol:src/route1.cpp": {"candidates": [finding("src/route1.cpp", kind="identity-typo")]},
+            "gpt-6-astra:src/route2.cpp": {"candidates": [finding("src/route2.cpp", start=2, end=2)]},
+            "gpt-5.6-sol:src/route2.cpp": {"candidates": [finding("src/route2.cpp", start=4, end=5)]}}})
+        self.assertEqual(self.run_review(), 0)
+        out = self.base / "exhaustive-run"
+        candidates = {f"{c['path']}:{c['start_line']}-{c['end_line']}:{c['defect_kind']}": c
+                      for c in (read_json(p) for p in (out / "results/candidates").glob("*/candidate.json"))}
+        self.assertEqual(sorted(candidates), ["src/route0.cpp:2-4:prefix-vs-exact", "src/route1.cpp:2-2:identity-typo",
+                                              "src/route1.cpp:2-2:prefix-vs-exact", "src/route2.cpp:2-2:prefix-vs-exact",
+                                              "src/route2.cpp:4-5:prefix-vs-exact"])
+        merged = candidates["src/route0.cpp:2-4:prefix-vs-exact"]
+        self.assertEqual(merged["models"], ["gpt-5.6-sol", "gpt-6-astra"])
+        self.assertEqual(len(merged["occurrences"]), 2)
+        self.assertEqual({o["finding"]["title"] for o in merged["occurrences"]},
+                         {"Prefix accepts wrong interface", "Different title"})
+        for candidate in candidates.values():
+            path = out / "results/validation" / candidate["id"] / "validation-input.json"
+            validation = read_json(path)
+            self.assertEqual(set(validation), {"id", "path", "start_line", "end_line", "defect_kind", "claims"})
+            self.assertEqual(validation["id"], candidate["id"])
+            self.assertEqual(len(validation["claims"]), len(candidate["occurrences"]))
+            self.assertTrue(all(set(claim) == {"title", "root_cause"} for claim in validation["claims"]))
+            raw = path.read_text()
+            for private in ("delimiter guard", "Wrong route selected", "Compare the full key", "gpt-",
+                            "trace.jsonl", "results/discovery", "confidence", "fix_"):
+                self.assertNotIn(private, raw)
+        self.assertEqual(read_json(out / "status.json")["verifier"]["succeeded"], 5)
+
+    def test_verifier_sessions_are_blind_to_siblings_and_discovery_context(self):
+        paths = [f"src/route{i}.cpp" for i in range(4)]
+        self.scenario({"codex": {p: {"candidates": [finding(p)]} for p in paths}})
+        self.assertEqual(self.run_review(), 0)
+        out = (self.base / "exhaustive-run").resolve()
+        prompts = [p.read_text() for p in sorted((out / "results/verifier").glob("*/prompt.txt"))]
+        self.assertEqual(len(prompts), 4)
+        for prompt in prompts:
+            for leak in ("prior_candidates", "candidate.json", "report.md", "trace.jsonl", "results/discovery",
+                         "results/verifier", "results/candidates", "delimiter guard", "Wrong route selected", "gpt-"):
+                self.assertNotIn(leak, prompt)
+            self.assertEqual(prompt.count("validation-input.json"), 1)
+        sizes = [len(p.encode()) for p in prompts]
+        self.assertLess(max(sizes) - min(sizes), 64)
+        starts = [e for e in self.events() if e["kind"] == "claude" and e["event"] == "start"]
+        self.assertEqual(len(starts), 4)
+        for start in starts:
+            argv = start["argv"]
+            added = [argv[i + 1] for i, a in enumerate(argv) if a == "--add-dir"]
+            self.assertEqual(len(added), 3)
+            self.assertIn(str(self.repo.resolve()), added)
+            self.assertIn(str(self.reference.resolve()), added)
+            self.assertEqual([Path(a).parent for a in added if Path(a).parent == out / "results/validation"],
+                             [out / "results/validation"])
+            for forbidden in (out, out / "results", out / "results/verifier", out / "results/candidates",
+                              out / "results/discovery"):
+                self.assertNotIn(str(forbidden), added)
+        self.assertEqual([e["event"] for e in self.events() if e["kind"] == "claude"], ["start", "end"] * 4)
+
+    def test_inconsistent_verdicts_are_invalid_results_and_retried(self):
+        paths = [f"src/route{i}.cpp" for i in range(3)]
+        self.scenario({"codex": {p: {"candidates": [finding(p)]} for p in paths},
+                       "claude": {paths[0]: {"inconsistent": True},
+                                  paths[1]: {"status": "rejected", "failed_gates": ["defect_kind", "fix_unique"]},
+                                  paths[2]: {"status": "needs-validation"}}})
+        self.assertEqual(self.run_review(), 1)
+        out = self.base / "exhaustive-run"
+        self.assertEqual(read_json(out / "status.json")["verifier"],
+                         {"queued": 0, "running": 0, "succeeded": 2, "failed": 1})
+        notices = [json.loads(line) for line in (out / "notifications.jsonl").read_text().splitlines()]
+        self.assertEqual([(n["lane"], n["attempts"], n["category"], n["stage"], n["reason"]) for n in notices],
+                         [("verifier", 3, "session", "result_validation", "invalid_result")])
+        verdicts = {read_json(p.parent / "completion.json")["task"]["path"]: read_json(p)
+                    for p in (out / "results/verifier").glob("*/result.json")}
+        self.assertEqual(verdicts[paths[1]]["status"], "rejected")
+        self.assertEqual(verdicts[paths[1]]["failed_gates"], ["defect_kind", "fix_unique"])
+        self.assertFalse(verdicts[paths[1]]["kind_fit"])
+        self.assertEqual(verdicts[paths[2]]["status"], "needs-validation")
+        self.assertEqual(verdicts[paths[2]]["failed_gates"], ["impact_reachable"])
+        self.assertEqual(len([e for e in self.events() if e["kind"] == "claude" and e["event"] == "start"]), 5)
+        before = self.events()
+        self.assertEqual(self.run_review(), 1)
+        self.assertEqual(self.events(), before)
+
+    def test_verifier_cap_stops_before_any_verifier_session_and_resumes(self):
+        from runner import run
+        paths = [f"src/route{i}.cpp" for i in range(3)]
+        self.scenario({"codex": {p: {"candidates": [finding(p)]} for p in paths}})
+        out = self.base / "exhaustive-run"
+        with self.assertRaises(ReviewError):
+            run(self.base / "exhaustive", "exhaustive", out, self.reference, lock_root=self.base / "locks",
+                diagnostics_root=self.base / "diagnostics", max_verifier_tasks=2)
+        self.assertFalse([e for e in self.events() if e["kind"] == "claude"])
+        self.assertEqual(len(list((out / "results/candidates").iterdir())), 3)
+        self.assertEqual(len(list((out / "results/validation").iterdir())), 3)
+        self.assertEqual(read_json(out / "results/screened.json"), [])
+        self.assertEqual(read_json(out / "status.json")["state"], "running")
+        codex_before = [e for e in self.events() if e["kind"] == "codex"]
+        self.assertEqual(run(self.base / "exhaustive", "exhaustive", out, self.reference, lock_root=self.base / "locks",
+                             diagnostics_root=self.base / "diagnostics", max_verifier_tasks=3), 0)
+        self.assertEqual([e for e in self.events() if e["kind"] == "codex"], codex_before)
+        self.assertEqual(read_json(out / "status.json")["verifier"]["succeeded"], 3)
+
+    def test_schemas_match_the_runner_gate_contract(self):
+        import runner
+        discovery = read_json(ROOT / "experiment/schemas/discovery.json")["properties"]["candidates"]["items"]
+        self.assertTrue(set(runner.GATE_FIELDS) <= set(discovery["required"]))
+        self.assertEqual(discovery["properties"]["defect_kind"]["enum"], runner.defect_kinds())
+        verifier = read_json(ROOT / "experiment/schemas/verifier.json")
+        self.assertEqual(verifier["properties"]["failed_gates"]["items"]["enum"], list(runner.GATES))
+        self.assertEqual(verifier["properties"]["status"]["enum"], ["confirmed", "rejected", "needs-validation"])
+        self.assertEqual(set(verifier["required"]), set(runner.VERDICT_FIELDS))
+        # The verifier schema is sent to a structured-output API that supports only
+        # types, enum, required and additionalProperties:false.
+        for name, spec in verifier["properties"].items():
+            self.assertTrue(set(spec) <= {"type", "enum", "items"}, name)
 
     def test_shell_run_supports_both_modes_and_explicit_queue(self):
         from review_queue import make_pilot_queue
@@ -375,7 +537,7 @@ sys.exit(runner.main())
             command = ['/bin/bash', str(ROOT / 'experiment/run-experiment.sh'), 'run', mode,
                        '--prepared', str(self.base / mode), '--out', str(self.base / (mode + '-shell')),
                        '--reference', str(self.reference), '--diagnostics-root', str(self.base / 'diagnostics'),
-                       '--queue', str(queue)]
+                       '--max-verifier-tasks', '20', '--queue', str(queue)]
             result = subprocess.run(command, capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(read_json(self.base / (mode + '-shell/status.json'))['state'], 'complete')
@@ -397,11 +559,11 @@ sys.exit(runner.main())
         self.assertEqual(self.events(), before)
         self.assertEqual(len((out / 'notifications.jsonl').read_text().splitlines()), 2)
 
-    def test_verifier_retry_failure_and_duplicate_contract(self):
+    def test_verifier_retry_failure_and_rejection_contract(self):
         paths = [f'src/route{i}.cpp' for i in range(3)]
         self.scenario({'codex': {p: {'candidates': [finding(p)]} for p in paths},
                        'claude': {paths[0]: {'first': 'partial'},
-                                  paths[1]: {'status': 'duplicate', 'duplicate_of': 'previous'},
+                                  paths[1]: {'status': 'rejected'},
                                   paths[2]: {'always': 'exit'}}})
         self.assertEqual(self.run_review(), 1)
         out = self.base / 'exhaustive-run'
@@ -410,7 +572,10 @@ sys.exit(runner.main())
         self.assertEqual(status['verifier']['succeeded'], 2)
         self.assertEqual(status['verifier']['failed'], 1)
         verdicts = [read_json(p) for p in (out / 'results/verifier').glob('*/result.json')]
-        self.assertEqual({v['status'] for v in verdicts}, {'confirmed', 'duplicate'})
+        self.assertEqual({v['status'] for v in verdicts}, {'confirmed', 'rejected'})
+        rejected = next(v for v in verdicts if v['status'] == 'rejected')
+        self.assertEqual(rejected['failed_gates'], ['fix_unique'])
+        self.assertEqual(rejected['fix_patch'], '')
         before = self.events()
         self.assertEqual(self.run_review(), 1)
         self.assertEqual(self.events(), before)

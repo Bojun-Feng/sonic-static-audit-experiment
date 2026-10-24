@@ -29,13 +29,22 @@ if kind == "codex":
     assert (Path(context["source_root"]) / path).is_file()
     assert Path(context["reference_root"]).is_dir()
 else:
-    candidate = json.loads(Path(context["candidate"]).read_text())
-    key = candidate["id"]
-    path = candidate["finding"]["path"]
+    # A blinded verifier sees one validation input: no sibling verdicts, no
+    # discovery evidence, no trace or result paths, and no other results tree.
+    assert set(context) == {"validation_input", "source_root", "reference_root"}, sorted(context)
+    assert "prior_candidates" not in prompt
+    validation_path = Path(context["validation_input"])
+    validation = json.loads(validation_path.read_text())
+    assert set(validation) == {"id", "path", "start_line", "end_line", "defect_kind", "claims"}, sorted(validation)
+    assert all(set(claim) == {"title", "root_cause"} for claim in validation["claims"])
+    key = validation["id"]
+    path = validation["path"]
     model = sys.argv[sys.argv.index("--model") + 1]
-    for occurrence in candidate["occurrences"]:
-        assert Path(occurrence["trace"]).is_file()
-        assert Path(occurrence["result"]).is_file()
+    added = [sys.argv[i + 1] for i, arg in enumerate(sys.argv) if arg == "--add-dir"]
+    assert str(validation_path.parent) in added, added
+    results = validation_path.parent.parent.parent
+    assert not any(Path(a) == results or Path(a) in (results / "verifier", results / "candidates", results / "discovery")
+                   for a in added), added
     assert (Path(context["source_root"]) / path).is_file()
 
 with (state / "count.lock").open("a") as lock:
@@ -118,14 +127,29 @@ if kind == "codex":
         emit({"type": "turn.completed", "usage": {"input_tokens": 100, "cached_input_tokens": 20, "output_tokens": 10}})
         Path(sys.argv[sys.argv.index("--output-last-message") + 1]).write_text(json.dumps(answer))
 else:
-    verdict = {"status": behavior.get("status", "confirmed"), "rationale": "Checked source and callers.",
-               "duplicate_of": behavior.get("duplicate_of")}
-    if verdict["duplicate_of"] == "previous":
-        verdict["duplicate_of"] = context["prior_candidates"][0]["id"]
+    status = behavior.get("status", "confirmed")
+    default_failed = {"confirmed": [], "rejected": ["fix_unique"], "needs-validation": ["impact_reachable"]}[status]
+    failed = behavior.get("failed_gates", default_failed)
+    patch = (f"--- a/{path}\n+++ b/{path}\n@@ -2,1 +2,1 @@\n"
+             '-auto x = key.find("Vrf");\n+auto x = (key == "Vrf") ? 0 : std::string::npos;\n')
+    verdict = {"status": status, "rationale": f"Checked {path}:{validation['start_line']} and its callers by reading only.",
+               "failed_gates": failed,
+               "wg_fit": "wg_fit" not in failed, "kind_fit": "defect_kind" not in failed,
+               "intention_clear": "intention_clear" not in failed, "impact_reachable": "impact_reachable" not in failed,
+               "fix_unique": "fix_unique" not in failed,
+               "files_touched": 2 if "files_touched" in failed else 1,
+               "fix_logic_lines": 80 if "fix_logic_lines" in failed else 2,
+               "defect_confidence": 3 if "defect_confidence" in failed else 5,
+               "remedy_confidence": 3 if "remedy_confidence" in failed else 5,
+               "fix_patch": patch if status == "confirmed" else ""}
+    if behavior.get("inconsistent"):
+        # A confirmed verdict that also names a failed gate must be refused by the runner.
+        verdict["failed_gates"] = ["fix_unique"]
     emit({"type": "system", "subtype": "init", "session_id": session, "model": model})
     if failure != "partial":
         emit({"type": "result", "subtype": "success", "is_error": False, "session_id": session,
               "structured_output": verdict, "usage": {"input_tokens": 70, "cache_read_input_tokens": 10},
-              "modelUsage": {model: {"inputTokens": 70, "outputTokens": 9}}, "total_cost_usd": 0.01})
+              "modelUsage": {model: {"inputTokens": 70, "outputTokens": 9}}, "total_cost_usd": 0.01,
+              "duration_ms": 1200})
 event("end")
 sys.exit(2 if failure == 'usage' else 1 if failure == "exit" else 0)

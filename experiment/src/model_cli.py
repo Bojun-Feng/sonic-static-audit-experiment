@@ -35,9 +35,9 @@ def discovery_prompt(task, repo, reference):
     return (EXPERIMENT / "prompts/discovery.txt").read_text() + "\nReview context:\n" + json_bytes(context).decode()
 
 
-def verifier_prompt(candidate, repo, reference, prior):
-    context = {"candidate": str(candidate), "source_root": str(repo),
-               "reference_root": str(reference), "prior_candidates": prior}
+def verifier_prompt(validation_input, repo, reference):
+    """Blinded validation prompt: one validation input, no prior verdicts or discovery context."""
+    context = {"validation_input": str(validation_input), "source_root": str(repo), "reference_root": str(reference)}
     return (EXPERIMENT / "prompts/verifier.txt").read_text() + "\nVerification context:\n" + json_bytes(context).decode()
 
 

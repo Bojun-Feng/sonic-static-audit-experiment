@@ -79,6 +79,19 @@ class QueueTests(unittest.TestCase):
         with self.assertRaises(ReviewError):
             build_tasks(prepared, "targeted")
 
+    def test_runner_config_validates_hard_gate_thresholds(self):
+        import review_queue
+        good = review_queue.runner_config()
+        self.assertEqual(good["gates"], {"max_files_touched": 1, "max_fix_logic_lines": 50, "min_confidence": 5})
+        for bad in ({**good, "gates": {**good["gates"], "min_confidence": 6}},
+                    {**good, "gates": {**good["gates"], "max_fix_logic_lines": 0}},
+                    {**good, "gates": {**good["gates"], "max_files_touched": "1"}},
+                    {**good, "gates": {"max_fix_logic_lines": 50}},
+                    {k: v for k, v in good.items() if k != "gates"}):
+            with self.subTest(bad=bad.get("gates")), mock.patch.object(review_queue, "read_json", return_value=bad), \
+                    self.assertRaises(ReviewError):
+                review_queue.runner_config()
+
     def test_recovery_queue_uses_only_failed_task_ids_and_new_preparation(self):
         from review_queue import build_tasks, make_recovery_queue
         for mode in ('exhaustive', 'targeted'):

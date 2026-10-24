@@ -5,5 +5,6 @@
   "discovery_slots": 16,
   "verifier_slots": 1,
   "max_attempts": 3,
-  "timeout_seconds": 1800
+  "timeout_seconds": 1800,
+  "gates": {"max_files_touched": 1, "max_fix_logic_lines": 50, "min_confidence": 5}
 }

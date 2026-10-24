@@ -15,6 +15,8 @@ import tarfile
 from common import ReviewError, exact_children, keys, read_json, require, sha256, within
 
 SUCCESS_FILES = ('trace.jsonl', 'stderr.log', 'prompt.txt', 'result.json', 'metadata.json')
+VALIDATION_FIELDS = ('id', 'path', 'start_line', 'end_line', 'defect_kind', 'claims')
+SCREENED_FIELDS = ('task_id', 'model', 'path', 'start_line', 'end_line', 'title', 'failed_gates')
 REASONS = {
     'missing_cli': ('configuration', 'configuration', False),
     'invalid_configuration': ('configuration', 'configuration', False),
@@ -77,6 +79,31 @@ def inventory(root):
         for name in ('candidate.json', 'report.md'):
             relative = (directory / name).relative_to(root).as_posix()
             files[relative] = regular_bytes(root, relative)
+    validation_root = within(root, 'results/validation')
+    if validation_root.exists():
+        validation_ids = set()
+        for directory in sorted(validation_root.iterdir()):
+            require(not directory.is_symlink() and directory.is_dir()
+                    and re.fullmatch(r'c-[0-9a-f]{24}', directory.name), 'invalid validation directory')
+            exact_children(directory, ['validation-input.json'])
+            relative = (directory / 'validation-input.json').relative_to(root).as_posix()
+            data = regular_bytes(root, relative)
+            value = json.loads(data)
+            keys(value, VALIDATION_FIELDS, 'validation input')
+            require(value['id'] == directory.name, 'validation input identity mismatch')
+            files[relative] = data
+            validation_ids.add(directory.name)
+        require(validation_ids == candidate_ids, 'validation inputs do not match candidates')
+    screened = within(root, 'results/screened.json')
+    if screened.exists():
+        data = regular_bytes(root, 'results/screened.json')
+        value = json.loads(data)
+        require(isinstance(value, list), 'screened findings must be a list')
+        for entry in value:
+            keys(entry, SCREENED_FIELDS, 'screened finding')
+            require(entry['task_id'] in task_ids and isinstance(entry['failed_gates'], list) and entry['failed_gates'],
+                    'invalid screened finding')
+        files['results/screened.json'] = data
     notices = within(root, 'notifications.jsonl')
     if notices.exists():
         data = regular_bytes(root, 'notifications.jsonl')
