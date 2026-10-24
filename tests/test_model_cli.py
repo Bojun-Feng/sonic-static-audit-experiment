@@ -264,7 +264,7 @@ class ModelCLITests(unittest.TestCase):
         discovery = (ROOT / "experiment/prompts/discovery.txt").read_text()
         verifier = (ROOT / "experiment/prompts/verifier.txt").read_text()
         self.assertLessEqual(len(discovery.encode()), 3000)
-        self.assertLessEqual(len(verifier.encode()), 2600)
+        self.assertLessEqual(len(verifier.encode()), 2650)
         gates = ("ROUTING WG FIT IS REQUIRED", "ONLY ELEMENTARY, LOCALIZED", "ONE OBVIOUS DETERMINISTIC FIX",
                  "VALIDITY FIRST", "A REAL DEFECT THAT FAILS ANY GATE")
         for name, prompt in (("discovery", discovery), ("verifier", verifier)):
@@ -279,11 +279,17 @@ class ModelCLITests(unittest.TestCase):
                     self.assertNotIn(shout, prompt)
         self.assertIn('{"candidates": []}', discovery)
         self.assertIn("omit", discovery)
+        # The inspection validator needs whole-file coverage plus one credited context command even for a
+        # clean unit; the prompt must say so unconditionally and warn off piped/chained searches it cannot credit.
+        for phrase in ("including a clean result", "both kinds of evidence", "not piped or chained"):
+            self.assertIn(phrase, discovery)
         for field in ("wg_fit", "kind_fit", "intention_clear", "impact_reachable", "fix_unique", "files_touched",
                       "fix_logic_lines", "defect_confidence", "remedy_confidence", "failed_gates"):
             self.assertIn(field, verifier)
         self.assertIn("real but out of scope", verifier)
         self.assertIn("When in doubt, reject", verifier)
+        # Uniqueness is only credible when the grader names and dismisses the alternatives a maintainer could defend.
+        self.assertIn("name the alternatives a maintainer could defend", verifier)
         self.assertNotIn("traces", verifier)
 
 
