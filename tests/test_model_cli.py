@@ -227,6 +227,18 @@ class ModelCLITests(unittest.TestCase):
             with self.subTest(case=case), self.assertRaises(ReviewError):
                 parse_codex(bad, {'candidates': []}, self.task, self.repo)
 
+    def test_both_discovery_modes_explain_practical_file_read_commands(self):
+        from model_cli import discovery_prompt
+        for mode in ("exhaustive", "targeted"):
+            task = {"task_id": f"{mode}-one", "model": "gpt-6-astra", "mode": mode,
+                    "path": "src/route.cpp", "unit_id": "unit-one"}
+            with self.subTest(mode=mode):
+                prompt = discovery_prompt(task, Path("/source"), Path("/references"))
+                self.assertIn("cat --", prompt)
+                self.assertIn("sed -n", prompt)
+                self.assertIn("rg -n", prompt)
+                self.assertIn("whole assigned file", prompt)
+
     def test_prompts_are_static_only_and_include_scope_and_readable_context(self):
         from model_cli import discovery_prompt, verifier_prompt
         task = {"task_id": "task-one", "model": "gpt-5.6-sol", "mode": "targeted",

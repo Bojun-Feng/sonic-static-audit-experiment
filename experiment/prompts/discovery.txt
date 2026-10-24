@@ -39,6 +39,12 @@ meaningful functions, types, members, or keys into callers, definitions, and
 guards. Searches with source paths and line numbers or reads of related source
 files provide context; local search matches also help when no external callers
 exist. Choose suitable read-only tools and command forms for the source.
+For both modes, read the whole assigned file with a completed command such as
+`cat -- <absolute assigned-file path>`; for large files, use successive
+`sed -n '1,200p' <absolute path>`-style ranges until every line is covered.
+Then inspect related source context with a line-numbered search such as
+`rg -n -F -- <identifier> <source_root>` or read the relevant caller or definition;
+keep command output visible in the native trace and avoid truncated output.
 A source card, listing, claimed read, failed command, or final answer alone is
 insufficient. If source evidence cannot be obtained, do not claim a completed
 review.
