@@ -95,22 +95,13 @@ if kind == "codex":
     answer = {"candidates": behavior.get("candidates", [])}
     emit({"type": "thread.started", "thread_id": session})
     emit({"type": "turn.started"})
-    if failure != "passive":
-        # Execute real read-only host commands against disposable source fixtures.
-        # grep -F is the portable local stand-in for rg's literal line search;
-        # retained events use the native rg command form.
-        root = Path(context["source_root"])
-        commands = [(["cat", "--", str(root / path)], None),
-                    (["rg", "-n", "-F", "--", "key", str(root)],
-                     ["grep", "-r", "-n", "-F", "--", "key", str(root)])]
-        for number, (argv, local) in enumerate(commands):
-            result = subprocess.run(local or argv, capture_output=True, text=True, check=True)
-            # The native CLI sometimes records a completed search with exit 0 and no output.
-            output = "" if number and behavior.get("search_output") == "lost" else result.stdout
-            emit({"type": "item.completed", "item": {"id": f"command-{number}",
-                  "type": "command_execution", "command": shlex.join(argv),
-                  "status": "completed", "exit_code": result.returncode,
-                  "aggregated_output": output}})
+    # Execute a real read-only host command against the disposable source fixture.
+    argv = ["cat", "--", str(Path(context["source_root"]) / path)]
+    result = subprocess.run(argv, capture_output=True, text=True, check=True)
+    emit({"type": "item.completed", "item": {"id": "command-0",
+          "type": "command_execution", "command": shlex.join(argv),
+          "status": "completed", "exit_code": result.returncode,
+          "aggregated_output": result.stdout}})
     if failure == "partial":
         emit({"type": "item.started", "item": {"type": "agent_message", "text": "INCOMPLETE-MARKER"}})
         Path(sys.argv[sys.argv.index("--output-last-message") + 1]).write_text('{"candidates": [')

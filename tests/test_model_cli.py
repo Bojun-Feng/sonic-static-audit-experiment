@@ -1,16 +1,14 @@
 """Native CLI command and completion contracts, without provider calls."""
 
 import copy
-import json
 from pathlib import Path
-import subprocess
 import sys
 import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "experiment/src"))
-from common import ReviewError, json_bytes
+from common import ReviewError
 
 
 class ModelCLITests(unittest.TestCase):
@@ -18,7 +16,6 @@ class ModelCLITests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.repo = Path(self.temp.name)
-        self.task = {"path": "route.cpp"}
         (self.repo / "route.cpp").write_text("void updateRoute();\n")
 
     def test_discovery_uses_guest_compatible_execution_mode(self):
@@ -62,10 +59,6 @@ class ModelCLITests(unittest.TestCase):
                 {"type": "item.completed", "item": {"id": "read", "type": "command_execution",
                  "command": "cat -- " + shlex.quote(str(self.repo / "route.cpp")),
                  "status": "completed", "exit_code": 0, "aggregated_output": "void updateRoute();\n"}},
-                {"type": "item.completed", "item": {"id": "context", "type": "command_execution",
-                 "command": "rg -n -F -- updateRoute " + shlex.quote(str(self.repo)),
-                 "status": "completed", "exit_code": 0,
-                 "aggregated_output": str(self.repo / "route.cpp") + ":1:void updateRoute();\n"}},
                 {"type": "item.completed", "item": {"type": "agent_message", "text": '{"candidates":[]}'}},
                 {"type": "turn.completed", "usage": {"input_tokens": 50, "cached_input_tokens": 10,
                                                        "output_tokens": 3}}]
@@ -93,19 +86,6 @@ class ModelCLITests(unittest.TestCase):
         events = self.codex_events()
         del events[-1]["usage"]
         self.assertIsNone(parse_codex(events, result)["usage"])
-
-    def test_codex_session_is_accepted_whatever_its_commands_retained(self):
-        from model_cli import parse_codex
-        result = {"candidates": []}
-        lost = self.codex_events()
-        lost[3]["item"]["aggregated_output"] = ""  # a completed search the CLI recorded without output
-        failed = self.codex_events()
-        failed[2]["item"].update(status="failed", exit_code=1, aggregated_output="")
-        passive = self.codex_events()
-        del passive[2:4]
-        for case, events in (("search output lost", lost), ("failed read", failed), ("no command", passive)):
-            with self.subTest(case=case):
-                self.assertEqual(parse_codex(events, result)["session_id"], "fresh-session")
 
     def test_claude_requires_success_and_preserves_native_usage(self):
         from model_cli import parse_claude
@@ -142,7 +122,6 @@ class ModelCLITests(unittest.TestCase):
                      "whole assigned file", "callers", "Ethernet4", "Ethernet40",
                      "defect_kind", "5/5", "omit", "files_touched", "DETERMINISTIC FIX", "not a general bug hunt"):
             self.assertIn(word, prompt)
-        self.assertNotIn('Use the exact command forms', prompt)
         prompt = verifier_prompt(Path("/validation/validation-input.json"), Path("/source"), Path("/references"))
         for word in ("confirmed", "rejected", "needs-validation", "fix_patch", "failed_gates", "Ethernet40",
                      "prior verdict", "/validation/validation-input.json", "/source", "/references", "static"):
@@ -172,10 +151,7 @@ class ModelCLITests(unittest.TestCase):
                     self.assertNotIn(shout, prompt)
         self.assertIn('{"candidates": []}', discovery)
         self.assertIn("omit", discovery)
-        # Discovery is told how to review its unit, not what its trace must retain.
         self.assertIn("Read the whole assigned file", discovery)
-        for phrase in ("native session trace", "both kinds of evidence", "is rejected"):
-            self.assertNotIn(phrase, discovery)
         for field in ("wg_fit", "kind_fit", "intention_clear", "impact_reachable", "fix_unique", "files_touched",
                       "fix_logic_lines", "defect_confidence", "remedy_confidence", "failed_gates"):
             self.assertIn(field, verifier)

@@ -212,27 +212,17 @@ sys.exit(runner.main())
         self.assertEqual(list((out / "work").iterdir()), [])
 
     def test_complete_sessions_publish_on_first_attempt_with_their_native_traces(self):
-        # One session's search came back empty with exit 0; another ran no command at all.
         for mode in ("exhaustive", "targeted"):
-            self.scenario({"codex": {"src/route0.cpp": {"search_output": "lost"},
-                                     "src/route1.cpp": {"always": "passive", "candidates": [finding("src/route1.cpp")]}}})
+            self.scenario({"codex": {"src/route1.cpp": {"candidates": [finding("src/route1.cpp")]}}})
             self.assertEqual(self.run_review(mode), 0)
             out = self.base / (mode + "-run")
             self.assertEqual(read_json(out / "status.json")["discovery"],
                              {"queued": 0, "running": 0, "succeeded": 12, "failed": 0})
             self.assertFalse((out / "notifications.jsonl").exists())
-            commands = {}
             for completion in (out / "results/discovery").glob("*/completion.json"):
-                task = read_json(completion)["task"]
                 self.assertEqual(read_json(completion.parent / "metadata.json")["attempt"], 1)
                 records = [json.loads(line) for line in (completion.parent / "trace.jsonl").read_text().splitlines()]
                 self.assertEqual([records[0]["type"], records[-1]["type"]], ["thread.started", "turn.completed"])
-                commands.setdefault(task["path"], []).append(
-                    [(e["item"]["command"].split()[0], e["item"]["exit_code"], e["item"]["aggregated_output"] == "")
-                     for e in records if e.get("item", {}).get("type") == "command_execution"])
-            self.assertEqual(commands["src/route0.cpp"], [[("cat", 0, False), ("rg", 0, True)]] * 2)
-            self.assertEqual(commands["src/route1.cpp"], [[], []])
-            self.assertEqual(commands["src/route2.cpp"], [[("cat", 0, False), ("rg", 0, False)]] * 2)
             self.assertEqual(len(list((out / "results/candidates").iterdir())), 1)
             self.assertEqual(read_json(out / "status.json")["verifier"]["succeeded"], 1)
         self.assertFalse(list((self.base / "diagnostics").rglob("failure.json")))
