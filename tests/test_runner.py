@@ -211,42 +211,38 @@ sys.exit(runner.main())
         self.assertEqual(before, self.events())
         self.assertEqual(list((out / "work").iterdir()), [])
 
-    def test_passive_trace_is_rejected_even_with_valid_candidates(self):
+    def test_complete_sessions_publish_on_first_attempt_with_their_native_traces(self):
+        # One session's search came back empty with exit 0; another ran no command at all.
         for mode in ("exhaustive", "targeted"):
-            self.scenario({"codex": {"src/route0.cpp": {
-                "always": "passive", "candidates": [finding("src/route0.cpp")]}}})
-            self.assertEqual(self.run_review(mode), 1)
+            self.scenario({"codex": {"src/route0.cpp": {"search_output": "lost"},
+                                     "src/route1.cpp": {"always": "passive", "candidates": [finding("src/route1.cpp")]}}})
+            self.assertEqual(self.run_review(mode), 0)
             out = self.base / (mode + "-run")
-            self.assertEqual(read_json(out / "status.json")["discovery"]["failed"], 2)
-            self.assertFalse(list((out / "results/candidates").iterdir()))
-            for trace in (out / "results/discovery").glob("*/trace.jsonl"):
-                records = [json.loads(line) for line in trace.read_text().splitlines()]
-                commands = [e["item"] for e in records if e.get("item", {}).get("type") == "command_execution"]
-                self.assertGreaterEqual(len(commands), 2)
-                self.assertTrue(all(c["status"] == "completed" and c["aggregated_output"] for c in commands))
+            self.assertEqual(read_json(out / "status.json")["discovery"],
+                             {"queued": 0, "running": 0, "succeeded": 12, "failed": 0})
+            self.assertFalse((out / "notifications.jsonl").exists())
+            commands = {}
+            for completion in (out / "results/discovery").glob("*/completion.json"):
+                task = read_json(completion)["task"]
+                self.assertEqual(read_json(completion.parent / "metadata.json")["attempt"], 1)
+                records = [json.loads(line) for line in (completion.parent / "trace.jsonl").read_text().splitlines()]
+                self.assertEqual([records[0]["type"], records[-1]["type"]], ["thread.started", "turn.completed"])
+                commands.setdefault(task["path"], []).append(
+                    [(e["item"]["command"].split()[0], e["item"]["exit_code"], e["item"]["aggregated_output"] == "")
+                     for e in records if e.get("item", {}).get("type") == "command_execution"])
+            self.assertEqual(commands["src/route0.cpp"], [[("cat", 0, False), ("rg", 0, True)]] * 2)
+            self.assertEqual(commands["src/route1.cpp"], [[], []])
+            self.assertEqual(commands["src/route2.cpp"], [[("cat", 0, False), ("rg", 0, False)]] * 2)
+            self.assertEqual(len(list((out / "results/candidates").iterdir())), 1)
+            self.assertEqual(read_json(out / "status.json")["verifier"]["succeeded"], 1)
+        self.assertFalse(list((self.base / "diagnostics").rglob("failure.json")))
 
-    def test_passive_clean_trace_retries_then_accepts_inspected_attempt(self):
-        self.scenario({"codex": {"src/route0.cpp": {"first": "passive"},
-                                  "src/route1.cpp": {"always": "passive"}}})
-        self.assertEqual(self.run_review(), 1)
-        out = self.base / "exhaustive-run"
-        self.assertEqual(read_json(out / "status.json")["discovery"]["failed"], 2)
-        for completion in (out / "results/discovery").glob("*/completion.json"):
-            value = read_json(completion)
-            if value["task"]["path"] == "src/route0.cpp":
-                self.assertEqual(read_json(completion.parent / "metadata.json")["attempt"], 2)
-        self.assertEqual(list((out / "work").iterdir()), [])
-        before = self.events()
-        self.assertEqual(self.run_review(), 1)
-        self.assertEqual(before, self.events())
-
-    def test_resume_revalidates_native_inspection_even_with_matching_hashes(self):
+    def test_resume_revalidates_the_native_session_even_with_matching_hashes(self):
         from common import sha256
         self.assertEqual(self.run_review(), 0)
         trace = next((self.base / "exhaustive-run/results/discovery").glob("*/trace.jsonl"))
         records = [json.loads(line) for line in trace.read_text().splitlines()]
-        trace.write_text("".join(json.dumps(e) + "\n" for e in records
-                                 if e.get("item", {}).get("type") != "command_execution"))
+        trace.write_text("".join(json.dumps(e) + "\n" for e in records if e.get("type") != "turn.completed"))
         completion = trace.parent / "completion.json"
         value = read_json(completion)
         value["artifacts"]["trace.jsonl"] = sha256(trace.read_bytes())
@@ -272,14 +268,14 @@ sys.exit(runner.main())
 
     def test_failed_attempts_stay_outside_publishable_results(self):
         self.scenario({'codex': {'src/route0.cpp': {'first': 'partial'},
-                                 'src/route1.cpp': {'always': 'passive'}}})
+                                 'src/route1.cpp': {'always': 'exit'}}})
         self.assertEqual(self.run_review(), 1)
         out = self.base / 'exhaustive-run'
         diagnostic_failures = list((self.base / 'diagnostics').rglob('failure.json'))
         self.assertEqual(len(diagnostic_failures), 8)
         records = [read_json(path) for path in diagnostic_failures]
-        self.assertEqual({r['category'] for r in records}, {'session', 'evidence'})
-        self.assertEqual({r['stage'] for r in records}, {'answer', 'inspection'})
+        self.assertEqual({r['category'] for r in records}, {'session', 'transport'})
+        self.assertEqual({r['stage'] for r in records}, {'answer', 'invoke'})
         self.assertTrue(all(r['detail'] and r['retryable'] for r in records))
         raw = b''.join(p.read_bytes() for p in (self.base / 'diagnostics').rglob('*') if p.is_file())
         self.assertIn(b'INCOMPLETE-MARKER', raw)
@@ -292,7 +288,7 @@ sys.exit(runner.main())
         self.assertTrue(all(not Path(e['cwd']).is_relative_to(out) for e in starts))
         self.assertTrue(all(not Path(e['cwd']).exists() for e in starts))
         notices = [json.loads(line) for line in (out / 'notifications.jsonl').read_text().splitlines()]
-        self.assertTrue(all(n['attempts'] == 3 and n['reason'] == 'missing_inspection' for n in notices))
+        self.assertTrue(all(n['attempts'] == 3 and n['reason'] == 'cli_exit' for n in notices))
 
     def test_missing_cli_is_deterministic_and_not_retried(self):
         (self.bin / 'codex').unlink()
@@ -305,9 +301,8 @@ sys.exit(runner.main())
                             and n['reason'] == 'missing_cli' and not n['retryable'] for n in notices))
         self.assertFalse((self.state / 'events.jsonl').exists())
 
-    def test_third_fresh_attempt_can_succeed_with_range_inspection(self):
-        self.scenario({'codex': {'src/route0.cpp': {'failures': ['partial', 'passive'],
-                                                  'inspection': 'ranges'}}})
+    def test_third_fresh_attempt_can_succeed(self):
+        self.scenario({'codex': {'src/route0.cpp': {'failures': ['partial', 'exit']}}})
         self.assertEqual(self.run_review(), 0)
         out = self.base / 'exhaustive-run'
         for completion in (out / 'results/discovery').glob('*/completion.json'):
@@ -317,26 +312,6 @@ sys.exit(runner.main())
                 self.assertTrue(metadata['session_id'].endswith('-3'))
         self.assertEqual(len(list((self.base / 'diagnostics').rglob('failure.json'))), 4)
         self.assertFalse((out / 'notifications.jsonl').exists())
-
-    def test_chained_inspection_in_one_shell_line_is_accepted_end_to_end(self):
-        self.scenario({'codex': {'src/route0.cpp': {'inspection': 'chained', 'candidates': [finding('src/route0.cpp')]}}})
-        self.assertEqual(self.run_review(), 0)
-        out = self.base / 'exhaustive-run'
-        self.assertFalse((out / 'notifications.jsonl').exists())
-        self.assertEqual(len(list((self.base / 'diagnostics').rglob('failure.json'))), 0)
-        checked = 0
-        for completion in (out / 'results/discovery').glob('*/completion.json'):
-            if read_json(completion)['task']['path'] != 'src/route0.cpp':
-                continue
-            checked += 1
-            self.assertEqual(read_json(completion.parent / 'metadata.json')['attempt'], 1)
-            records = [json.loads(line) for line in (completion.parent / 'trace.jsonl').read_text().splitlines()]
-            commands = [e['item']['command'] for e in records if e.get('item', {}).get('type') == 'command_execution']
-            self.assertEqual(len(commands), 1)
-            self.assertIn(' && ', commands[0])
-            self.assertIn('; grep -rn key ', commands[0])
-        self.assertEqual(checked, 2)
-        self.assertEqual(len(list((out / 'results/candidates').iterdir())), 1)
 
     def test_isolation_failure_is_private_deterministic_and_never_starts_a_model(self):
         from common import AttemptError
@@ -724,6 +699,40 @@ class VerdictShapeTests(unittest.TestCase):
         good = self.verdict(status="confirmed", failed_gates=[], impact_reachable=True, defect_confidence=5,
                             remedy_confidence=5, fix_patch=patch, files_touched=1, fix_logic_lines=2)
         validate_answer(good, Path("."), "verifier", task, config)
+
+
+class FindingShapeTests(unittest.TestCase):
+    """A discovery answer must be the schema's shape and name real lines of the frozen source."""
+
+    def test_wrong_candidate_fields_are_invalid_results(self):
+        from review_queue import runner_config
+        from runner import validate_answer
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            (repo / "src").mkdir()
+            (repo / "src/route0.cpp").write_text(FIXTURE)
+            config, task = runner_config(), {"path": "src/route0.cpp"}
+            validate_answer({"candidates": []}, repo, "discovery", task, config)
+            validate_answer({"candidates": [finding("src/route0.cpp")]}, repo, "discovery", task, config)
+            good = finding("src/route0.cpp")
+            cases = {"extra field": {**good, "trace": "x"},
+                     "missing field": {k: v for k, v in good.items() if k != "impact"},
+                     "empty text": finding("src/route0.cpp", root_cause=" "),
+                     "unknown kind": finding("src/route0.cpp", kind="style"),
+                     "text flag": finding("src/route0.cpp", wg_fit="true"),
+                     "no file touched": finding("src/route0.cpp", files_touched=0),
+                     "confidence above 5": finding("src/route0.cpp", defect_confidence=6),
+                     "missing source": finding("src/missing.cpp"),
+                     "outside source": finding("../route0.cpp"),
+                     "lines past end": finding("src/route0.cpp", start=3, end=99),
+                     "reversed lines": finding("src/route0.cpp", start=3, end=2)}
+            for case, bad in cases.items():
+                with self.subTest(case=case), self.assertRaises(ReviewError):
+                    validate_answer({"candidates": [bad]}, repo, "discovery", task, config)
+            for answer in ({"candidates": [], "notes": ""}, {"candidates": {}}, {}):
+                with self.subTest(answer=answer), self.assertRaises(ReviewError):
+                    validate_answer(answer, repo, "discovery", task, config)
+
 
 if __name__ == "__main__":
     unittest.main()

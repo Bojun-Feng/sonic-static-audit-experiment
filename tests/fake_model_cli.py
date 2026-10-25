@@ -98,27 +98,19 @@ if kind == "codex":
     if failure != "passive":
         # Execute real read-only host commands against disposable source fixtures.
         # grep -F is the portable local stand-in for rg's literal line search;
-        # retained events use the production contract's rg command form.
+        # retained events use the native rg command form.
         root = Path(context["source_root"])
         commands = [(["cat", "--", str(root / path)], None),
                     (["rg", "-n", "-F", "--", "key", str(root)],
                      ["grep", "-r", "-n", "-F", "--", "key", str(root)])]
-        if behavior.get('inspection') == 'ranges':
-            commands = [(['sed', '-n', '1,1p', str(root / path)], None),
-                        (['sed', '-n', '2,$p', str(root / path)], None),
-                        (['grep', '-Rn', 'key', str(root)], None)]
-        elif behavior.get('inspection') == 'chained':
-            # One shell line chaining range reads and a search, as native sessions do.
-            source = shlex.quote(str(root / path))
-            script = (f"wc -l {source} && sed -n '1,1p' {source} && sed -n '2,$p' {source}; "
-                      f"grep -rn key {shlex.quote(str(root))}")
-            commands = [(['/bin/bash', '-lc', script], None)]
         for number, (argv, local) in enumerate(commands):
             result = subprocess.run(local or argv, capture_output=True, text=True, check=True)
-            emit({"type": "item.completed", "item": {"id": f"inspection-{number}",
+            # The native CLI sometimes records a completed search with exit 0 and no output.
+            output = "" if number and behavior.get("search_output") == "lost" else result.stdout
+            emit({"type": "item.completed", "item": {"id": f"command-{number}",
                   "type": "command_execution", "command": shlex.join(argv),
                   "status": "completed", "exit_code": result.returncode,
-                  "aggregated_output": result.stdout}})
+                  "aggregated_output": output}})
     if failure == "partial":
         emit({"type": "item.started", "item": {"type": "agent_message", "text": "INCOMPLETE-MARKER"}})
         Path(sys.argv[sys.argv.index("--output-last-message") + 1]).write_text('{"candidates": [')

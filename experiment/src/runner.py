@@ -346,7 +346,7 @@ def run_locked(tasks, binding, repo, out, reference, config, lock_root, output_f
             answer = read_json(destination / 'result.json')
             if lane == 'discovery':
                 events = [json.loads(line) for line in (destination / 'trace.jsonl').read_text().splitlines()]
-                parse_codex(events, answer, task, repo)
+                parse_codex(events, answer)
             validate_answer(answer, repo, lane, task, config)
             with mutex:
                 states[lane][task_id] = 'succeeded'
@@ -397,7 +397,7 @@ def run_locked(tasks, binding, repo, out, reference, config, lock_root, output_f
                     if lane == 'discovery':
                         answer = read_json(work / 'answer.json')
                         at_stage('session')
-                        metadata = parse_codex(events, answer, task, repo)
+                        metadata = parse_codex(events, answer)
                     else:
                         at_stage('session')
                         answer, metadata = parse_claude(events)

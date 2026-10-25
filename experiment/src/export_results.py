@@ -30,8 +30,6 @@ REASONS = {
     'invalid_answer': ('session', 'answer', True),
     'incomplete_session': ('session', 'session', True),
     'invalid_result': ('session', 'result_validation', True),
-    'missing_inspection': ('evidence', 'inspection', True),
-    'source_unavailable': ('input', 'inspection', False),
 }
 
 

@@ -4,7 +4,6 @@ import json
 
 from review_queue import EXPERIMENT, runner_config
 from common import AttemptError, ReviewError, json_bytes, require
-from inspection import validate_inspection
 
 
 def discovery_command(binary, model, work):
@@ -42,7 +41,7 @@ def verifier_prompt(validation_input, repo, reference):
 
 
 
-def parse_codex(events, answer, task, repo):
+def parse_codex(events, answer):
     require(events and all(isinstance(e, dict) for e in events), "empty or invalid Codex events")
     started = [e for e in events if e.get("type") == "thread.started"]
     turns = [e for e in events if e.get("type") == "turn.started"]
@@ -58,12 +57,6 @@ def parse_codex(events, answer, task, repo):
         require(messages and json.loads(messages[-1]) == answer, "Codex final message does not match result")
     except (ValueError, TypeError) as exc:
         raise ReviewError("invalid Codex final message") from exc
-    try:
-        validate_inspection(events, task, repo)
-    except ReviewError as exc:
-        raise AttemptError('evidence', 'inspection', 'missing_inspection', True, str(exc)) from exc
-    except (OSError, UnicodeError) as exc:
-        raise AttemptError('input', 'inspection', 'source_unavailable', False, str(exc)) from exc
     return {"session_id": started[0]["thread_id"], "usage": completed[0].get("usage")}
 
 

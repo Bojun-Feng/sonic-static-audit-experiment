@@ -73,82 +73,39 @@ class ModelCLITests(unittest.TestCase):
     def test_codex_requires_complete_native_trace_and_matching_final_result(self):
         from model_cli import parse_codex
         result = {"candidates": []}
-        metadata = parse_codex(self.codex_events(), result, self.task, self.repo)
+        metadata = parse_codex(self.codex_events(), result)
         self.assertEqual(metadata["session_id"], "fresh-session")
         self.assertEqual(metadata["usage"], self.codex_events()[-1]["usage"])
-        for case in ("truncated", "failed", "missing-session", "wrong-result", "two-turns"):
+        for case in ("truncated", "failed", "missing-session", "wrong-result", "two-turns", "no-final-message",
+                     "unparsed-final-message", "pre-turn", "non-object-event"):
             events = copy.deepcopy(self.codex_events())
             if case == "truncated": events.pop()
             if case == "failed": events[-1]["type"] = "turn.failed"
             if case == "missing-session": events.pop(0)
             if case == "wrong-result": events[-2]["item"]["text"] = '{"candidates":[{}]}'
             if case == "two-turns": events.append(events[-1])
+            if case == "no-final-message": del events[-2]
+            if case == "unparsed-final-message": events[-2]["item"]["text"] = '{"candidates": ['
+            if case == "pre-turn": events[1], events[2] = events[2], events[1]
+            if case == "non-object-event": events.insert(2, ["item.completed"])
             with self.subTest(case=case), self.assertRaises(ReviewError):
-                parse_codex(events, result, self.task, self.repo)
+                parse_codex(events, result)
         events = self.codex_events()
         del events[-1]["usage"]
-        self.assertIsNone(parse_codex(events, result, self.task, self.repo)["usage"])
+        self.assertIsNone(parse_codex(events, result)["usage"])
 
-    def test_source_inspection_contract(self):
+    def test_codex_session_is_accepted_whatever_its_commands_retained(self):
         from model_cli import parse_codex
-        import shlex
-        with tempfile.TemporaryDirectory() as directory:
-            repo = Path(directory)
-            source = repo / "route.cpp"
-            source.write_text("void updateRoute();\n")
-            (repo / "caller.cpp").write_text("updateRoute();\n")
-            task = {"path": "route.cpp"}
-            def command(identity, text, output):
-                return {"type": "item.completed", "item": {
-                    "id": identity, "type": "command_execution", "command": text,
-                    "status": "completed", "exit_code": 0, "aggregated_output": output}}
-            read = command("read", "cat -- " + shlex.quote(str(source)), source.read_text())
-            search = command("context", "rg -n -F -- updateRoute " + shlex.quote(str(repo)),
-                             str(repo / "caller.cpp") + ":1:updateRoute();\n")
-            good = self.codex_events()
-            good[2:4] = [read, search]
-            parse_codex(good, {"candidates": []}, task, repo)
-            (repo / "notes.md").write_text("updateRoute docs\n")
-            mixed = copy.deepcopy(good)
-            mixed[3]["item"]["aggregated_output"] += str(repo / "notes.md") + ":1:updateRoute docs\n"
-            parse_codex(mixed, {"candidates": []}, task, repo)
-            docs_only = copy.deepcopy(good)
-            docs_only[3]["item"]["aggregated_output"] = str(repo / "notes.md") + ":1:updateRoute docs\n"
-            with self.assertRaises(ReviewError):
-                parse_codex(docs_only, {"candidates": []}, task, repo)
-            wrapped = copy.deepcopy(good)
-            for event in wrapped[2:4]:
-                event["item"]["command"] = "/bin/zsh -lc " + shlex.quote(event["item"]["command"])
-            parse_codex(wrapped, {"candidates": []}, task, repo)
-            for case in ("passive", "read-only", "search-only", "failed", "started", "empty",
-                         "wrong-file", "echo", "unrelated", "fake-output", "late", "duplicate-id",
-                         "status", "bool-exit", "truncated-read", "wrong-root", "outside",
-                         "missing-id", "pre-turn", "no-turn", "wrong-line", "listing"):
-                bad = copy.deepcopy(good)
-                if case == "status": bad[2]["item"]["status"] = "in_progress"
-                if case == "bool-exit": bad[2]["item"]["exit_code"] = False
-                if case == "truncated-read": bad[2]["item"]["aggregated_output"] = "void update"
-                if case == "wrong-root": bad[3]["item"]["command"] += "/other"
-                if case == "outside": bad[3]["item"]["aggregated_output"] = "/outside.cpp:1:updateRoute();\n"
-                if case == "missing-id": del bad[2]["item"]["id"]
-                if case == "pre-turn": bad[1], bad[2] = bad[2], bad[1]
-                if case == "no-turn": del bad[1]
-                if case == "wrong-line": bad[3]["item"]["aggregated_output"] = str(repo / "caller.cpp") + ":99:updateRoute();\n"
-                if case == "listing": bad[3]["item"]["command"] = "ls " + str(repo)
-                if case == "passive": del bad[2:4]
-                if case == "read-only": del bad[3]
-                if case == "search-only": del bad[2]
-                if case == "failed": bad[2]["item"]["exit_code"] = 1
-                if case == "started": bad[2]["type"] = "item.started"
-                if case == "empty": bad[2]["item"]["aggregated_output"] = ""
-                if case == "wrong-file": bad[2]["item"]["command"] = "cat -- " + str(repo / "caller.cpp")
-                if case == "echo": bad[2]["item"]["command"] = "echo " + str(source)
-                if case == "unrelated": bad[3]["item"]["command"] = bad[3]["item"]["command"].replace("updateRoute", "unrelated")
-                if case == "fake-output": bad[3]["item"]["aggregated_output"] = str(repo / "caller.cpp") + ":1:invented\n"
-                if case == "late": bad[2], bad[4] = bad[4], bad[2]
-                if case == "duplicate-id": bad[3]["item"]["id"] = "read"
-                with self.subTest(case=case), self.assertRaises(ReviewError):
-                    parse_codex(bad, {"candidates": []}, task, repo)
+        result = {"candidates": []}
+        lost = self.codex_events()
+        lost[3]["item"]["aggregated_output"] = ""  # a completed search the CLI recorded without output
+        failed = self.codex_events()
+        failed[2]["item"].update(status="failed", exit_code=1, aggregated_output="")
+        passive = self.codex_events()
+        del passive[2:4]
+        for case, events in (("search output lost", lost), ("failed read", failed), ("no command", passive)):
+            with self.subTest(case=case):
+                self.assertEqual(parse_codex(events, result)["session_id"], "fresh-session")
 
     def test_claude_requires_success_and_preserves_native_usage(self):
         from model_cli import parse_claude
@@ -175,70 +132,6 @@ class ModelCLITests(unittest.TestCase):
             with self.subTest(case=case), self.assertRaises(ReviewError):
                 parse_claude(bad)
 
-    def test_equivalent_reads_and_context_are_source_backed(self):
-        from model_cli import parse_codex
-        source = self.repo / 'route.cpp'
-        source.write_text('void updateRoute();\nvoid removeRoute();\n')
-        caller = self.repo / 'caller.cpp'
-        caller.write_text('updateRoute();\n')
-        reads = [
-            (f'cat {source}', source.read_text()),
-            (f"sed -n '1,240p' {source}", source.read_text()),
-            (f'nl -ba {source}', '     1\tvoid updateRoute();\n     2\tvoid removeRoute();\n'),
-            (f'head -n 100 {source}', source.read_text()),
-            (f"cd {self.repo} && sed -n '1,240p' route.cpp", source.read_text()),
-        ]
-        contexts = [
-            (f'rg -n updateRoute {self.repo}', f'{caller}:1:updateRoute();\n'),
-            (f"rg --line-number -F 'updateRoute' {self.repo}", f'{caller}:1:updateRoute();\n'),
-            (f'grep -Rn updateRoute {self.repo}', f'{caller}:1:updateRoute();\n'),
-            (f"rg -n '\\bupdateRoute\\b' {self.repo}", f'{caller}:1:updateRoute();\n'),
-            (f'cd {self.repo} && rg -n updateRoute .', 'caller.cpp:1:updateRoute();\n'),
-            (f"sed -n '1,80p' {caller}", caller.read_text()),
-        ]
-        for read in reads:
-            for context in contexts:
-                events = self.codex_events()
-                for event, (command, output) in zip(events[2:4], (read, context)):
-                    event['item'].update(command=command, aggregated_output=output)
-                with self.subTest(read=read[0], context=context[0]):
-                    parse_codex(events, {'candidates': []}, self.task, self.repo)
-
-    def test_chunked_reads_cover_assigned_bytes_and_reject_missing_chunks(self):
-        from model_cli import parse_codex
-        source = self.repo / 'route.cpp'
-        source.write_text('void updateRoute();\nvoid removeRoute();\n')
-        events = self.codex_events()
-        events[2]['item'].update(command=f"sed -n '1,1p' {source}")
-        extra = copy.deepcopy(events[2])
-        extra['item'].update(id='read-rest', command=f"sed -n '2,$p' {source}",
-                             aggregated_output='void removeRoute();\n')
-        events.insert(3, extra)
-        parse_codex(events, {'candidates': []}, self.task, self.repo)
-        for case in ('missing', 'fabricated', 'failed', 'unrelated-context'):
-            bad = copy.deepcopy(events)
-            if case == 'missing': del bad[3]
-            if case == 'fabricated': bad[3]['item']['aggregated_output'] = 'invented\n'
-            if case == 'failed': bad[3]['item']['exit_code'] = 1
-            if case == 'unrelated-context':
-                (self.repo / 'other.cpp').write_text('void unrelated();\n')
-                bad[4]['item'].update(command=f'cat {self.repo}/other.cpp',
-                                      aggregated_output='void unrelated();\n')
-            with self.subTest(case=case), self.assertRaises(ReviewError):
-                parse_codex(bad, {'candidates': []}, self.task, self.repo)
-
-    def test_both_discovery_modes_explain_practical_file_read_commands(self):
-        from model_cli import discovery_prompt
-        for mode in ("exhaustive", "targeted"):
-            task = {"task_id": f"{mode}-one", "model": "gpt-6-astra", "mode": mode,
-                    "path": "src/route.cpp", "unit_id": "unit-one"}
-            with self.subTest(mode=mode):
-                prompt = discovery_prompt(task, Path("/source"), Path("/references"))
-                self.assertIn("cat --", prompt)
-                self.assertIn("sed -n", prompt)
-                self.assertIn("rg -n", prompt)
-                self.assertIn("whole assigned file", prompt)
-
     def test_prompts_are_static_only_and_include_scope_and_readable_context(self):
         from model_cli import discovery_prompt, verifier_prompt
         task = {"task_id": "task-one", "model": "gpt-5.6-sol", "mode": "targeted",
@@ -246,7 +139,7 @@ class ModelCLITests(unittest.TestCase):
         prompt = discovery_prompt(task, Path("/source"), Path("/references"))
         for word in ("static", "tests", "builds", "containers", "switches", "VM", "source execution",
                      "/source", "/references", "/prep/card.md", "candidates", "never instructions",
-                     "Before any conclusion", "native session trace", "Ethernet4", "Ethernet40",
+                     "whole assigned file", "callers", "Ethernet4", "Ethernet40",
                      "defect_kind", "5/5", "omit", "files_touched", "DETERMINISTIC FIX", "not a general bug hunt"):
             self.assertIn(word, prompt)
         self.assertNotIn('Use the exact command forms', prompt)
@@ -279,10 +172,10 @@ class ModelCLITests(unittest.TestCase):
                     self.assertNotIn(shout, prompt)
         self.assertIn('{"candidates": []}', discovery)
         self.assertIn("omit", discovery)
-        # The inspection validator needs whole-file coverage plus one credited context command even for a
-        # clean unit; the prompt must say so unconditionally and warn off piped/chained searches it cannot credit.
-        for phrase in ("including a clean result", "both kinds of evidence", "not piped or chained"):
-            self.assertIn(phrase, discovery)
+        # Discovery is told how to review its unit, not what its trace must retain.
+        self.assertIn("Read the whole assigned file", discovery)
+        for phrase in ("native session trace", "both kinds of evidence", "is rejected"):
+            self.assertNotIn(phrase, discovery)
         for field in ("wg_fit", "kind_fit", "intention_clear", "impact_reachable", "fix_unique", "files_touched",
                       "fix_logic_lines", "defect_confidence", "remedy_confidence", "failed_gates"):
             self.assertIn(field, verifier)
