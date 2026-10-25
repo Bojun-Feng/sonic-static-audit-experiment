@@ -18,6 +18,39 @@ class ModelCLITests(unittest.TestCase):
         self.repo = Path(self.temp.name)
         (self.repo / "route.cpp").write_text("void updateRoute();\n")
 
+    def test_both_discovery_models_use_exact_max_effort_argv(self):
+        from model_cli import discovery_command
+        from review_queue import EXPERIMENT
+        for model in ("gpt-6-astra", "gpt-5.6-sol"):
+            with self.subTest(model=model):
+                self.assertEqual(discovery_command("/usr/bin/codex", model, self.repo), [
+                    "/usr/bin/codex", "exec", "--model", model, "--ephemeral", "--json",
+                    "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check",
+                    "--sandbox", "danger-full-access", "--color", "never", "--cd", str(self.repo),
+                    "-c", 'model_reasoning_effort="max"',
+                    "-c", 'approval_policy="never"', "-c", 'web_search="disabled"',
+                    "-c", "features.multi_agent=false", "-c", "features.apps=false",
+                    "-c", "project_doc_max_bytes=0", "-c", "check_for_update_on_startup=false",
+                    "--output-schema", str(EXPERIMENT / "schemas/discovery.json"),
+                    "--output-last-message", str(self.repo / "answer.json"), "-",
+                ])
+
+    def test_verifier_uses_exact_max_effort_argv(self):
+        from model_cli import verifier_command
+        from review_queue import EXPERIMENT
+        readable = [self.repo / "source", self.repo / "references", self.repo / "validation"]
+        self.assertEqual(verifier_command("/usr/bin/claude", self.repo, readable), [
+            "/usr/bin/claude", "--print", "--model", "claude-opus-5-5", "--effort", "max",
+            "--output-format", "stream-json", "--verbose", "--no-session-persistence",
+            "--safe-mode", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+            "--settings", '{"disableAllHooks":true}', "--setting-sources", "",
+            "--tools", "Read,Grep,Glob", "--allowedTools", "Read,Grep,Glob",
+            "--permission-mode", "dontAsk", "--disable-slash-commands",
+            "--json-schema", (EXPERIMENT / "schemas/verifier.json").read_text(),
+            "--add-dir", str(readable[0]), "--add-dir", str(readable[1]),
+            "--add-dir", str(readable[2]),
+        ])
+
     def test_discovery_uses_guest_compatible_execution_mode(self):
         from review_queue import runner_config
         from model_cli import discovery_command

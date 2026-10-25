@@ -11,6 +11,7 @@ def discovery_command(binary, model, work):
     return [binary, "exec", "--model", model, "--ephemeral", "--json",
             "--ignore-user-config", "--ignore-rules", "--skip-git-repo-check",
             "--sandbox", "danger-full-access", "--color", "never", "--cd", str(work),
+            "-c", 'model_reasoning_effort="max"',
             "-c", 'approval_policy="never"', "-c", 'web_search="disabled"',
             "-c", "features.multi_agent=false", "-c", "features.apps=false",
             "-c", "project_doc_max_bytes=0", "-c", "check_for_update_on_startup=false",
@@ -19,7 +20,7 @@ def discovery_command(binary, model, work):
 
 
 def verifier_command(binary, work, readable):
-    return [binary, "--print", "--model", runner_config()["verifier_model"],
+    return [binary, "--print", "--model", runner_config()["verifier_model"], "--effort", "max",
             "--output-format", "stream-json", "--verbose", "--no-session-persistence",
             "--safe-mode", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
             "--settings", '{"disableAllHooks":true}', "--setting-sources", "",
