@@ -1,123 +1,119 @@
-# Incremental benchmark
+# Independent review queue
 
-`src/incremental.py` runs configuration → queue → discovery → screening →
-independent review → resume. Its frozen inventory contains 284 exhaustive files
-and 131 targeted units at source commit
-`2f1f7921551ae9f9c799c8b83b8a15b1d172d395`.
-
-## Execute or plan
-
-From the repository root:
+Prepare both arms into a fresh directory, then run from the repository root:
 
 ```sh
-python3 experiment/src/incremental.py --archive /path/to/frozen-input \
+./experiment/run-experiment.sh prepare exhaustive --repo /path/to/source --out /path/to/prepared/exhaustive
+./experiment/run-experiment.sh prepare targeted --repo /path/to/source --out /path/to/prepared/targeted
+```
+
+For a Git-free frozen snapshot, pass the same immutable `--identity FILE` to
+both prepare commands. The identity attests the known revision; preparation
+validates its source bytes. Keep that identity available alongside the original
+input roots for resume. The reference root supplies immutable reference files.
+Prepared manifests retain their original source and identity paths.
+
+Start the queue:
+
+```sh
+python3 experiment/src/incremental.py --source /path/to/source \
+  --reference /path/to/reference --prepared /path/to/prepared \
   --out .runtime/benchmark --config experiment/incremental-config.json --execute
 ```
 
-Omit `--execute` to import and plan offline. The importer reads completed
-max-production discovery observations, task definitions, prepared inputs, and
-source/reference trees. It validates task identity, prompt context, structured
-answers, native sessions, and metadata. The archived launch record attests
-max effort; effective model settings are known when emitted natively.
+The prepared root contains newly generated `exhaustive/` and `targeted/`
+manifest/index bundles and targeted source cards: 284 files and 131 groups at
+revision `2f1f7921551ae9f9c799c8b83b8a15b1d172d395`. Every configured discovery
+cell begins missing in an empty output. Omit `--execute` to plan offline.
+Source selection and cards are validated before scheduling. The frozen source may
+contain relative symlinks within its own tree. Exhaustive unit IDs use the frozen
+manifest order; targeted IDs come directly from the newly generated index.
 
-Every admitted finding gets its own candidate ID, including findings with the
-same location and claim. Every enabled reviewer condition gets a blinded input
-containing the candidate ID, location, defect kind, and title/root-cause claim.
-Discovery evidence, model identity, and other verdicts stay private.
+## Configuration
 
-## Configure
+```json
+{
+  "schema_version": 1,
+  "experiment_version": "sonic-incremental-v1",
+  "source_commit": "2f1f7921551ae9f9c799c8b83b8a15b1d172d395",
+  "discovery": [
+    {"model": "gpt-6-astra", "effort": "max", "service_tier": "default"},
+    {"model": "gpt-5.6-sol", "effort": "max", "service_tier": "default"}
+  ],
+  "verifier": [
+    {"model": "claude-fable-5-1", "effort": "max", "service_tier": "default"}
+  ],
+  "passes": 1,
+  "concurrency": 2,
+  "timeout_seconds": 1800
+}
+```
 
-`incremental-config.json` enables Astra and GPT-5.6 Sol discovery at max and
-Fable 5.1 review at max. Each condition explicitly names `model`, `effort`, and
-`service_tier`. The capability catalog is `incremental-models.json`; add a model
-there and enable its condition in the run configuration. Supported service tier
-is `default`. Missing native effective-setting fields remain unknown.
+The model catalog is `incremental-models.json`. Each condition explicitly names
+its model, effort, and service tier. `passes` starts at 1 and can only increase.
+Each pass is a separate discovery sample; its number is in the cell ID and
+receipts, not the discovery prompt, so repetitions have identical prompt bytes.
+Raising `passes` from 1 to 2 queues only pass 2 when pass 1 is complete.
+Every finding from every pass gets every configured reviewer condition.
+Add conditions to the same configuration and rerun the same command. Existing
+conditions must remain; concurrency and timeout may change. Frozen inputs,
+source revision, templates, gates, and experiment version bind each output
+directory. A different contract needs a fresh output.
 
-A fresh output uses the supplied conditions. Reusing an output allows condition
-expansion and changes to retry count or timeout. Recorded conditions retain their
-identity. Reordering conditions preserves cell identity. The explicit experiment
-version, source revision, templates, gates, and input bytes bind the output.
-Use a new version and output directory for an intentional contract change.
+## Scheduling and resume
 
-`prompts/`, `schemas/`, and `runner-config.json` define the contract;
-`review_validation.py` enforces the gates. Template contents are recorded in
-`experiment.json`. Comparison uses literal contents and explicit identities.
+The queue pairs every unit with every discovery condition. Up to `concurrency`
+independent calls run at once across discovery and review. A completed discovery
+publishes immediately; each admitted finding queues every reviewer condition
+without waiting for the remaining discoveries. There is no candidate merging.
 
-## Resume and results
+Cell IDs use readable arm, unit, model, effort, and pass values. Receipts carry
+the same task and condition. Candidate IDs use discovery cell and finding index.
+Adding passes or reordering conditions preserves earlier IDs and accepted
+results. A failed attempt retries within the same pass; it is not a new pass.
+Reviewer input contains only candidate ID, location, defect kind, and title/root
+cause claims. Discovery evidence and other verdicts stay private.
 
-Execution is serial under an output lock. An identical command validates and
-skips completed cells, then attempts missing or failed cells. Each invocation
-supplies a fresh per-cell attempt budget. Interrupted attempts keep their receipt
-and captured stream, with an additional interruption record. Unobserved end times
-and usage remain unknown. Success publication is atomic after native-session,
-answer, and gate validation.
+Each missing cell gets one attempt per invocation. A failed or incomplete attempt
+remains in its receipt directory; the next invocation starts a fresh attempt.
+Published successes are validated and skipped before provider calls. Native
+usage, timing, prompts, and streams are retained. Missing native fields remain
+unknown. Publication uses an atomic directory rename. An interrupted controller
+may leave a running receipt; the absence of a published success determines retry.
 
-An invalid published success stops preflight, preserves the result and candidate
-ledger, and writes `state: invalid` to `status.json`. Resolve the damaged input
-or choose a fresh output directory. Comparisons retained under invalid status
-require validation before use.
+An output lock prevents simultaneous controllers, and native subprocesses retain
+the lock until they exit. Setup copies frozen inputs; interrupted initial copying
+requires a fresh output directory. Invalid published successes stop the command
+and remain available for inspection.
 
-Initial input copying is not transactional. An interruption before both
-`experiment.json` and `config.json` exist requires a fresh output directory.
-Resume applies to model attempts after setup completes.
+Optional repeatable `--unit ARM:UNIT_ID` restricts native calls to exact frozen
+units and their reviews. `--max-calls N` caps attempted cells across both lanes.
+Omitting both visits the full queue. Exit zero means no attempted cell failed;
+`status.json` also reports queued cells, including work deferred by a selector or
+cap. These options use the same configuration and result directories.
 
 | Path | Contents |
 | --- | --- |
-| `experiment.json`, `config.json` | Input binding and enabled conditions |
-| `inputs/` | Frozen source, references, and prepared cards |
-| `results/discovery/`, `results/verifier/` | Successful native streams, prompt, answer, metadata, completion |
-| `attempts/` | Attempt receipts, stdout/stderr, usage, timing, failures |
-| `candidates.json`, `screened.json` | Independent findings and gate decisions |
-| `validation/` | Blinded inputs |
-| `status.json` | Cell states and counts |
-| `import-diagnostics.json` | Invalid archive observations eligible for discovery |
+| `experiment.json`, `config.json` | Frozen input binding and configured conditions |
+| `inputs/` | Source, reference, and source-card copies |
+| `results/discovery/`, `results/verifier/` | Published native streams, prompt, answer, metadata, completion |
+| `attempts/` | Per-attempt receipts, native streams, usage, timing, and failures |
+| `candidates.json`, `screened.json` | Independent findings and hard-gate decisions |
+| `validation/` | Blinded reviewer inputs |
+| `status.json` | Queue states and counts |
 
-Native accounting is retained when emitted, including on failed attempts.
-Imported timing contains the recorded elapsed time; unavailable timestamps stay
-null. Controller-owned pipes capture stdout/stderr while worker diagnostics stay
-hidden. Source/reference/card copies are exposed read-only inside the OS boundary.
-The archive, output parent, and sibling results stay hidden. Outputs whose parent
-would hide the CLI schema are rejected before setup; `.runtime/benchmark` uses a
-dedicated results parent. The isolation probe must pass before model invocation.
+## Worker boundary
 
-## Pilots and repeats
-
-Use repeatable `--unit ARM:UNIT_ID` to select exact frozen units. Reviews follow
-the candidate's origin unit. Use positive `--max-calls N` to bound native launches
-across discovery, repeats, reviews, and retries. Unselected or budget-deferred
-cells stay queued. Exit zero means the invocation observed no failed executions;
-inspect status for queued work. Omitting selectors and the cap visits the full
-configured queue.
-
-`incremental-pilot-config.json` enables low, medium, high, xhigh, and max for Astra
-and production Sol, with Fable max and one attempt per invocation. For example,
-`--unit exhaustive:f-41d17f83ff64d407110c` selects `cfgmgr/intfmgr.cpp` and
-`--unit exhaustive:f-e228024a409a3ef6d0d0` selects `orchagent/return_code.h`.
-These two units have 16 non-max discovery cells and one admitted imported finding.
-Actual review counts depend on admitted discoveries and the call cap.
-
-To repeat an imported discovery, select its unit and supply
-`--repeat-discovery ARM--UNIT_ID--MODEL--max --repeat-id NAME`. The name binds to
-that cell; reusing it resumes/skips the repeat, and a new name requests another
-observation. The imported result stays intact. `repeats/NAME/historical/` holds
-its snapshot; `fresh/` holds the repeat success, `attempts/` its traces, and
-`comparison.json` the comparison.
-
-A repeat is a separate reproducibility observation with its own findings and
-comparison. The main candidate/review ledger is independent. Comparisons include
-parsed-result equality, schema validity, screening counts, sessions, usage,
-cost, duration, and prompt contexts. Relocated input paths are recorded explicitly.
-Model output equality is measured per repeat.
-
-## Verify offline
-
-```sh
-python3 -m unittest discover -s tests -p 'test_incremental*.py'
-python3 -m unittest discover -s tests
-```
-
-Fake-CLI tests cover full-queue execution, zero-call resume, retries, expansion,
-blinding, pilots, and repeats. Read-only archive tests verify 830 valid discovery
-observations and 49 independent admitted findings. macOS tests exercise the real
-sandbox with fake CLIs. Tests report skips for unavailable archive or sandbox
-prerequisites; Linux isolation and bootstrap contracts use local mocks.
+Linux requires bubblewrap with usable user/PID namespaces; macOS requires
+`sandbox-exec`. A probe checks isolation before each native invocation. The
+input roots, output parent, sibling results, and sibling working directories are
+hidden. Workers can read their assigned frozen inputs and write their own scratch
+directory. Controller-owned pipes retain diagnostics outside worker access.
+Use a dedicated output parent such as `.runtime/benchmark`; it must not contain
+the CLI executable or schemas. Provider authentication remains host-managed:
+the native client can authenticate, while model tools are denied provider
+credential directories, configured credential roots, macOS keychains, and
+`/proc`. Codex uses a read-only native permissions profile with tool networking
+disabled and a core-only shell environment. Claude exposes only Read/Grep/Glob
+with credential-path deny rules. These controls require the pinned standalone
+CLI versions from `config.json`.
