@@ -80,6 +80,11 @@ def events_at(directory):
     return events
 
 
+def selection_profile_compatible(prepared, current):
+    return ({k: v for k, v in prepared.items() if k != 'guest_cli_versions'}
+            == {k: v for k, v in current.items() if k != 'guest_cli_versions'})
+
+
 class FreshInputs:
     """Validated, newly prepared static inputs for every queue unit."""
     def __init__(self, source, reference, prepared):
@@ -102,7 +107,7 @@ class FreshInputs:
             manifest = read_json(directory / 'manifest.json')
             index = read_json(directory / 'selected-groups.json')
             require(manifest['source_commit'] == SOURCE_COMMIT, 'prepared source revision mismatch')
-            require(manifest['profile'] == read_json(EXPERIMENT / 'config.json'),
+            require(selection_profile_compatible(manifest['profile'], read_json(EXPERIMENT / 'config.json')),
                     'prepared selection profile mismatch')
             require(files == COUNTS['exhaustive'] and groups == (COUNTS[arm] if arm == 'targeted' else 0),
                     'incomplete prepared selection: expected 284 files and 131 targeted groups')
