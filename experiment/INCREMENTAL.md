@@ -28,6 +28,9 @@ cell begins missing in an empty output. Omit `--execute` to plan offline.
 Source selection and cards are validated before scheduling. The frozen source may
 contain relative symlinks within its own tree. Exhaustive unit IDs use the frozen
 manifest order; targeted IDs come directly from the newly generated index.
+Add `--discovery-only` to an executing invocation to run discovery while leaving
+missing reviews queued. The reviewer conditions and inputs remain registered;
+omit the flag on a later invocation in the same output root to run those reviews.
 
 ## Configuration
 

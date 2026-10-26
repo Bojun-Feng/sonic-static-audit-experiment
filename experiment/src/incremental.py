@@ -331,7 +331,7 @@ def read_success(directory, task, condition, pass_no, lane, repo, gates, prompt)
 
 
 def run(source, reference, prepared, out, config, *, execute=False, codex='codex', claude='claude',
-        units=None, max_calls=None):
+        units=None, max_calls=None, discovery_only=False):
     """Plan missing cells offline; execute only when explicitly requested."""
     validate_config(config)
     fresh = FreshInputs(source, reference, prepared)
@@ -353,10 +353,10 @@ def run(source, reference, prepared, out, config, *, execute=False, codex='codex
         except BlockingIOError as exc:
             raise ReviewError('another runner owns this output') from exc
         return run_locked(fresh, out, config, execute, {'discovery': codex, 'verifier': claude}, lock.fileno(),
-                          units, max_calls)
+                          units, max_calls, discovery_only)
 
 
-def run_locked(fresh, out, config, execute, binaries, output_fd, units, max_calls):
+def run_locked(fresh, out, config, execute, binaries, output_fd, units, max_calls, discovery_only=False):
     binding_path = out / 'experiment.json'
     inputs = out / 'inputs'
     sources = {'source': fresh.source, 'reference': fresh.reference, 'prepared': fresh.prepared}
@@ -438,7 +438,7 @@ def run_locked(fresh, out, config, execute, binaries, output_fd, units, max_call
         states[lane][key] = 'queued'
         if destination.exists():
             accept(job, read_success(destination, task, condition, pass_no, lane, repo, fresh.gates, prompt))
-        elif execute and allowed:
+        elif execute and allowed and (lane == 'discovery' or not discovery_only):
             # Reviews can run as soon as their discovery publishes.
             (pending.appendleft if lane == 'verifier' else pending.append)(job)
 
@@ -543,12 +543,13 @@ def main():
     parser.add_argument('--out', required=True, type=Path)
     parser.add_argument('--config', type=Path, default=EXPERIMENT / 'incremental-config.json')
     parser.add_argument('--execute', action='store_true', help='invoke providers for missing cells (default: offline plan)')
+    parser.add_argument('--discovery-only', action='store_true', help='defer missing reviews while running discovery')
     parser.add_argument('--unit', action='append', dest='units', help='exact frozen ARM:UNIT_ID (repeatable)')
     parser.add_argument('--max-calls', type=int, help='maximum cells attempted this invocation')
     args = parser.parse_args()
     try:
         report = run(args.source, args.reference, args.prepared, args.out, read_json(args.config), execute=args.execute, units=args.units,
-                     max_calls=args.max_calls)
+                     max_calls=args.max_calls, discovery_only=args.discovery_only)
         print(json.dumps({k: v for k, v in report.items() if k != 'cells'}, indent=2))
         return int(any(report[lane]['failed'] for lane in ('discovery', 'verifier') if lane in report))
     except (ReviewError, OSError, ValueError) as exc:
