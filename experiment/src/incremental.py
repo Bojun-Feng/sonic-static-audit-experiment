@@ -55,10 +55,7 @@ def validate_config(value, previous=None):
             identity = (model, condition['effort'])
             require(identity not in seen, 'duplicate model/effort condition')
             seen.add(identity)
-        if previous:
-            require(all(c in conditions for c in previous[lane]), 'config is expand-only; conditions cannot change or disappear')
     if previous:
-        require(value['passes'] >= previous['passes'], 'passes can only increase')
         require(all(value[k] == previous[k] for k in ('schema_version', 'experiment_version', 'source_commit')),
                 'contract changed; use an explicit NEW experiment version and output directory')
     return value

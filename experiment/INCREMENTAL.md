@@ -53,15 +53,17 @@ omit the flag on a later invocation in the same output root to run those reviews
 ```
 
 The model catalog is `incremental-models.json`. Each condition explicitly names
-its model, effort, and service tier. `passes` starts at 1 and can only increase.
-Each pass is a separate discovery sample; its number is in the cell ID and
+its model, effort, and service tier. The configured conditions and `passes` are
+the invocation's worklist: the queue enumerates exactly those cells, reuses their
+published results, runs the missing ones, and reports only them in `status.json`,
+`candidates.json`, and `screened.json`. Published cells outside the current
+configuration stay in place and are reused when a later configuration names them
+again. Each pass is a separate discovery sample; its number is in the cell ID and
 receipts, not the discovery prompt, so repetitions have identical prompt bytes.
-Raising `passes` from 1 to 2 queues only pass 2 when pass 1 is complete.
 Every finding from every pass gets every configured reviewer condition.
-Add conditions to the same configuration and rerun the same command. Existing
-conditions must remain; concurrency and timeout may change. Frozen inputs,
-source revision, templates, gates, and experiment version bind each output
-directory. A different contract needs a fresh output.
+Concurrency and timeout may change. Frozen inputs, source revision, templates,
+gates, and experiment version bind each output directory. A different contract
+needs a fresh output.
 
 ## Scheduling and resume
 
@@ -72,8 +74,8 @@ without waiting for the remaining discoveries. There is no candidate merging.
 
 Cell IDs use readable arm, unit, model, effort, and pass values. Receipts carry
 the same task and condition. Candidate IDs use discovery cell and finding index.
-Adding passes or reordering conditions preserves earlier IDs and accepted
-results. A failed attempt retries within the same pass; it is not a new pass.
+Changing passes or conditions preserves earlier IDs and published results.
+A failed attempt retries within the same pass; it is not a new pass.
 Reviewer input contains only candidate ID, location, defect kind, and title/root
 cause claims. Discovery evidence and other verdicts stay private.
 
@@ -97,7 +99,7 @@ cap. These options use the same configuration and result directories.
 
 | Path | Contents |
 | --- | --- |
-| `experiment.json`, `config.json` | Frozen input binding and configured conditions |
+| `experiment.json`, `config.json` | Frozen input binding and the current worklist configuration |
 | `inputs/` | Source, reference, and source-card copies |
 | `results/discovery/`, `results/verifier/` | Published native streams, prompt, answer, metadata, completion |
 | `attempts/` | Per-attempt receipts, native streams, usage, timing, and failures |
