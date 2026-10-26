@@ -1,0 +1,119 @@
+{
+  "gpt-6-astra": {
+    "provider": "codex",
+    "efforts": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ],
+    "service_tiers": [
+      "default"
+    ]
+  },
+  "gpt-5.6-sol": {
+    "provider": "codex",
+    "efforts": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ],
+    "service_tiers": [
+      "default"
+    ]
+  },
+  "gpt-6-sol": {
+    "provider": "codex",
+    "efforts": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ],
+    "service_tiers": [
+      "default"
+    ]
+  },
+  "gpt-6.1-sol": {
+    "provider": "codex",
+    "efforts": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ],
+    "service_tiers": [
+      "default"
+    ]
+  },
+  "gpt-5.6-terra": {
+    "provider": "codex",
+    "efforts": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ],
+    "service_tiers": [
+      "default"
+    ]
+  },
+  "gpt-6-luna": {
+    "provider": "codex",
+    "efforts": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ],
+    "service_tiers": [
+      "default"
+    ]
+  },
+  "gpt-5.6-luna": {
+    "provider": "codex",
+    "efforts": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ],
+    "service_tiers": [
+      "default"
+    ]
+  },
+  "claude-fable-5-1": {
+    "provider": "claude",
+    "efforts": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ],
+    "service_tiers": [
+      "default"
+    ]
+  },
+  "claude-opus-5-5": {
+    "provider": "claude",
+    "efforts": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+    ],
+    "service_tiers": [
+      "default"
+    ]
+  }
+}

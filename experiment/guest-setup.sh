@@ -31,7 +31,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM HUP
 export DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
 
-# Worker isolation for the new VM only.
+# Worker isolation for the sonic-static-review-v2 profile.
 if [[ $vm_name == sonic-static-review-v2 ]]; then
     [[ $(id -u) -ne 0 ]] || {
         printf 'ERROR: worker isolation must be checked as the unprivileged guest user\n' >&2
@@ -95,7 +95,7 @@ with urllib.request.urlopen(url, timeout=60) as response, open(target, "xb") as 
 if digest.hexdigest() != expected:
     raise SystemExit("Node archive SHA-256 mismatch")
 PY
-# /opt/audit-node and /opt/audit-clis are legacy guest paths kept for the existing VM.
+# Install tools in /opt/audit-node and /opt/audit-clis.
 sudo install -d -m 0755 /opt/audit-node
 sudo tar -xzf "$guest_work/node.tar.gz" --strip-components=1 -C /opt/audit-node
 sudo ln -s /opt/audit-node/bin/node /usr/local/bin/node

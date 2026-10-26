@@ -4,36 +4,13 @@ import json
 import os
 from pathlib import Path
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
 
-from common import AttemptError, require
+from common import AttemptError
 
-ROOT = Path(__file__).resolve().parents[2]
-
-
-def default_root():
-    return Path('/var/tmp') / f'sonic-static-review-diagnostics-{os.getuid()}'
-
-
-def private_root(value, protected):
-    path = Path(value)
-    require(path.is_absolute() and not path.is_symlink(), 'diagnostics root must be absolute and not a symlink')
-    path = path.resolve()
-    for other in (ROOT, Path('/mnt/results'), *protected):
-        other = Path(other).resolve()
-        require(not path.is_relative_to(other) and not other.is_relative_to(path),
-                'diagnostics must be outside and disjoint from repository, results, inputs, and worker scratch')
-    path.mkdir(parents=True, mode=0o700, exist_ok=True)
-    info = path.stat()
-    require(path.is_dir() and info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700,
-            'diagnostics root must be an owned mode-0700 directory')
-    return path
-
-
-def isolation_prefix(root, hidden=(), exposed=()):
+def isolation_prefix(root, hidden=(), exposed=(), writable=()):
     """Worker command prefix: the private diagnostics root and every hidden tree
     are masked; only the listed inputs are re-exposed, read-only, inside them."""
     hidden, exposed = [str(Path(p)) for p in hidden], [str(Path(p)) for p in exposed]
@@ -55,6 +32,7 @@ def isolation_prefix(root, hidden=(), exposed=()):
         # mask is sealed read-only afterwards, in that order.
         masks = [arg for path in hidden for arg in ('--tmpfs', path)]
         binds = [arg for path in exposed for arg in ('--ro-bind', path, path)]
+        binds += [arg for path in writable for arg in ('--bind', str(path), str(path))]
         seals = [arg for path in reversed(hidden) for arg in ('--remount-ro', path)]
         return [binary, '--die-with-parent', '--unshare-user', '--unshare-pid', '--unshare-ipc',
                 '--bind', '/', '/', '--dev', '/dev', '--tmpfs', str(root), '--remount-ro', str(root),
@@ -62,17 +40,18 @@ def isolation_prefix(root, hidden=(), exposed=()):
     if sys.platform == 'darwin':
         # Later rules win: deny the masks, then allow reads of the exposed inputs.
         rules = ' '.join([f'(deny file-read* file-write* (subpath {json.dumps(path)}))' for path in (str(root), *hidden)]
-                         + [f'(allow file-read* (subpath {json.dumps(path)}))' for path in exposed])
+                         + [f'(allow file-read* (subpath {json.dumps(path)}))' for path in exposed]
+                         + [f'(allow file-read* file-write* (subpath {json.dumps(str(path))}))' for path in writable])
         profile = f'(version 1) (allow default) {rules} (deny process-info* (target others)) (deny mach-priv-task-port)'
         return ['/usr/bin/sandbox-exec', '-p', profile]
     raise AttemptError('configuration', 'worker_isolation', 'isolation_unavailable', False,
                        'worker isolation requires Linux bubblewrap or macOS sandbox-exec')
 
 
-def verified_worker_prefix(root, protected=(), hidden=(), exposed=(), probe_dir=None):
+def verified_worker_prefix(root, protected=(), hidden=(), exposed=(), writable=(), probe_dir=None):
     """Fail before any model call unless the OS enforces the private root, the
     hidden trees, and the read-only exposures. Returns the base worker prefix."""
-    prefix = isolation_prefix(root, hidden, exposed)
+    prefix = isolation_prefix(root, hidden, exposed, writable)
     if any(Path(prefix[0]).resolve().is_relative_to(Path(path).resolve()) for path in (*protected, *hidden)):
         raise AttemptError('configuration', 'worker_isolation', 'isolation_unavailable', False,
                            'isolation executable is inside source/reference/prepared/output/hidden directories')

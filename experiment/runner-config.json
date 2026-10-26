@@ -1,10 +1,7 @@
 {
-  "schema_version": 1,
-  "discovery_models": ["gpt-6-astra", "gpt-5.6-sol"],
-  "verifier_model": "claude-opus-5-5",
-  "discovery_slots": 16,
-  "verifier_slots": 1,
-  "max_attempts": 3,
-  "timeout_seconds": 1800,
-  "gates": {"max_files_touched": 1, "max_fix_logic_lines": 50, "min_confidence": 5}
+  "gates": {
+    "max_files_touched": 1,
+    "max_fix_logic_lines": 50,
+    "min_confidence": 5
+  }
 }

@@ -15,7 +15,7 @@ from common import ReviewError, read_json, require, validate_config
 
 EXPERIMENT = Path(__file__).resolve().parents[1]
 ROOT = EXPERIMENT.parent
-VM_NAME = "sonic-static-audit"  # Legacy runtime name of the existing VM; keep unchanged.
+VM_NAME = "sonic-static-audit"
 IMAGE_BASE = "https://cloud-images.ubuntu.com/releases/noble/release-20261017"
 NODE_VERSION = "22.14.0"
 PLACEHOLDERS = ("/absolute/path/to/sonic-swss", "/absolute/path/to/reference-materials",

@@ -119,7 +119,7 @@ def production_path(path):
 def validate_config(config):
     fields = ["profile", "intended_source_commit", "source_roots",
               "domain_anchors", "patterns", "grouping", "restrictions"]
-    # Existing static-only profiles need not specify VM tooling.
+    # Static-only profiles may omit VM tooling.
     if isinstance(config, dict) and "guest_cli_versions" in config:
         fields.append("guest_cli_versions")
         versions = config["guest_cli_versions"]

@@ -5,9 +5,9 @@ usage() {
     cat <<'EOF'
 Usage:
   run-experiment.sh prepare {exhaustive|targeted} [--repo DIR] [--out DIR] [--config FILE] [--identity FILE]
-  run-experiment.sh run {exhaustive|targeted} --reference DIR [--prepared DIR] [--out DIR] [--queue FILE] [--diagnostics-root DIR] [--max-verifier-tasks N] [--hide DIR]...
-Prepare performs local static selection only. Run invokes standalone model CLIs.
-Defaults: sibling sonic-swss source, results/MODE prepared inputs, results/MODE-run output.
+Prepare performs local static selection only.
+Benchmark execution: python3 experiment/src/incremental.py (see INCREMENTAL.md).
+Defaults: sibling sonic-swss source, results/MODE prepared inputs.
 EOF
 }
 
@@ -19,48 +19,26 @@ if [[ ${1:-} == --help || ${1:-} == -h ]]; then
 fi
 [[ $# -ge 2 ]] || { usage >&2; exit 2; }
 action=$1
-[[ $action == prepare || $action == run ]] || fail 'command must be prepare or run'
+[[ $action == prepare ]] || fail 'only prepare is supported; use experiment/src/incremental.py for the benchmark'
 mode=$2
 [[ $mode == exhaustive || $mode == targeted ]] || fail 'mode must be exhaustive or targeted'
 shift 2
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo="$script_dir/../../sonic-swss"
-prepared="$script_dir/../results/$mode"
-out="$prepared"
-[[ $action != run ]] || out="$script_dir/../results/$mode-run"
+out="$script_dir/../results/$mode"
 config="$script_dir/config.json"
-reference=''
 identity=''
-queue=''
-diagnostics=''
-verifier_cap=''
-hide=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --hide)
+        --repo|--out|--config|--identity)
             [[ $# -ge 2 && -n $2 && $2 != --* ]] || fail "$1 requires a value"
-            [[ $action == run ]] || fail "$1 is only valid for run"
-            hide+=("$2")
-            shift 2
-            ;;
-        --repo|--out|--config|--identity|--prepared|--reference|--queue|--diagnostics-root|--max-verifier-tasks)
-            [[ $# -ge 2 && -n $2 && $2 != --* ]] || fail "$1 requires a value"
-            case "$1" in
-                --repo|--config|--identity) [[ $action == prepare ]] || fail "$1 is only valid for prepare" ;;
-                --prepared|--reference|--queue|--diagnostics-root|--max-verifier-tasks) [[ $action == run ]] || fail "$1 is only valid for run" ;;
-            esac
             case "$1" in
                 --repo) repo=$2 ;;
                 --out) out=$2 ;;
                 --config) config=$2 ;;
                 --identity) identity=$2 ;;
-                --prepared) prepared=$2 ;;
-                --reference) reference=$2 ;;
-                --queue) queue=$2 ;;
-                --diagnostics-root) diagnostics=$2 ;;
-                --max-verifier-tasks) verifier_cap=$2 ;;
             esac
             shift 2
             ;;
@@ -70,17 +48,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 command -v python3 >/dev/null 2>&1 || fail 'Python 3.10 or newer is required'
-if [[ $action == run ]]; then
-    [[ -n $reference ]] || fail 'run requires --reference DIR'
-    args=(--prepared "$prepared" --mode "$mode" --out "$out" --reference "$reference")
-    [[ -z $queue ]] || args+=(--queue "$queue")
-    [[ -z $diagnostics ]] || args+=(--diagnostics-root "$diagnostics")
-    [[ -z $verifier_cap ]] || args+=(--max-verifier-tasks "$verifier_cap")
-    if [[ ${#hide[@]} -gt 0 ]]; then
-        for dir in "${hide[@]}"; do args+=(--hide "$dir"); done
-    fi
-    exec python3 -B "$script_dir/src/runner.py" "${args[@]}"
-fi
 args=(--repo "$repo" --config "$config" --out "$out" --mode "$mode")
 [[ -z $identity ]] || args+=(--identity "$identity")
 python3 -B "$script_dir/src/select.py" "${args[@]}"
