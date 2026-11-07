@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fresh-input queue of independent static-correctness discovery cells."""
+"""Queue of independent static-correctness discovery cells over prepared static inputs."""
 
 from pathlib import Path
 import json
@@ -82,8 +82,8 @@ def selection_profile_compatible(prepared, current):
             == {k: v for k, v in current.items() if k != 'guest_cli_versions'})
 
 
-class FreshInputs:
-    """Validated, newly prepared static inputs for every queue unit."""
+class PreparedInputs:
+    """Validated prepared static inputs for every queue unit."""
     def __init__(self, source, reference, prepared):
         from validate import validate
         self.source, self.reference, self.prepared = (
@@ -122,7 +122,7 @@ def invoke(command, prompt, work, timeout, output_fd, capture):
     """Stream worker pipes into private files opened only by the controller.
 
     Inherited regular-file stdout/stderr descriptors point into the hidden tree:
-    macOS denies fstat on them, and some runtimes silently disable their streams.
+    macOS denies fstat on them, and the CLI runtime can then silently disable its output streams.
     Pipes preserve native output without granting access to diagnostic files.
     """
     with (capture / 'trace.jsonl').open('xb', buffering=0) as stdout, \
@@ -196,16 +196,16 @@ def invoke(command, prompt, work, timeout, output_fd, capture):
 def credential_paths():
     """Host authentication is available to the CLI, never its model tools."""
     home = Path.home()
-    paths = [home / '.codex', home / 'Library/Keychains', Path('/proc')]
-    if os.environ.get('CODEX_HOME'):
-        paths.append(Path(os.environ['CODEX_HOME']).expanduser().resolve())
+    paths = [home / '.codex', home / '.claude', home / '.claude.json',
+             home / 'Library/Keychains', Path('/proc')]
+    paths += [Path(os.environ[name]).expanduser().resolve()
+              for name in ('CODEX_HOME', 'CLAUDE_CONFIG_DIR') if os.environ.get(name)]
     return sorted(set(map(str, paths)))
 
 
 def command(binary, condition, work):
     validate_condition(condition)
     model, effort = condition['model'], condition['effort']
-    require(condition['service_tier'] == 'default', 'unsupported CLI service tier')
     return [binary, 'exec', '--model', model, '--ephemeral', '--json', '--ignore-user-config',
             '--ignore-rules', '--skip-git-repo-check', '--strict-config',
             '-c', 'default_permissions="review"',
@@ -275,7 +275,7 @@ def read_success(directory, task, condition, pass_no, repo, prompt):
     require((directory / 'stderr.log').is_file(), 'completed stderr missing')
     origin = completion['origin']
     keys(origin, ['kind', 'attempt'], 'completion origin')
-    require(origin['kind'] == 'native', 'completion must be a native queue attempt')
+    require(origin['kind'] == 'native', 'completion must come from a queue attempt')
     attempt = within(directory.parents[2], origin['attempt'])
     require(attempt.parent == directory.parents[2] / 'attempts' / 'discovery' / directory.name
             and (attempt / 'attempt.json').is_file(), 'completion attempt missing or outside its cell')
@@ -293,15 +293,15 @@ def run(source, reference, prepared, out, config, *, execute=False, codex='codex
         units=None, max_calls=None):
     """Plan missing cells offline; execute only when explicitly requested."""
     validate_config(config)
-    fresh = FreshInputs(source, reference, prepared)
-    available = {f"{arm}:{unit['unit_id']}" for arm in ARMS for unit in fresh.units[arm]}
+    prepared_inputs = PreparedInputs(source, reference, prepared)
+    available = {f"{arm}:{unit['unit_id']}" for arm in ARMS for unit in prepared_inputs.units[arm]}
     require(units is None or (isinstance(units, list) and units
             and all(isinstance(unit, str) and unit in available for unit in units)
             and len(set(units)) == len(units)), 'selected units must be distinct exact frozen arm:unit IDs')
     require(max_calls is None or (type(max_calls) is int and max_calls > 0), 'max-calls must be a positive integer')
     out = Path(out).resolve()
     require(all(not out.is_relative_to(root) and not root.is_relative_to(out)
-                for root in (fresh.source, fresh.reference, fresh.prepared)),
+                for root in (prepared_inputs.source, prepared_inputs.reference, prepared_inputs.prepared)),
             'output must be disjoint from input roots')
     require(not (EXPERIMENT / 'schemas/discovery.json').is_relative_to(out.parent),
             'output parent would hide the CLI schema; use a separate results directory')
@@ -311,19 +311,19 @@ def run(source, reference, prepared, out, config, *, execute=False, codex='codex
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise ReviewError('another runner owns this output') from exc
-        return run_locked(fresh, out, config, execute, codex, lock.fileno(), units, max_calls)
+        return run_locked(prepared_inputs, out, config, execute, codex, lock.fileno(), units, max_calls)
 
 
-def run_locked(fresh, out, config, execute, codex, output_fd, units, max_calls):
+def run_locked(prepared_inputs, out, config, execute, codex, output_fd, units, max_calls):
     binding_path = out / 'experiment.json'
     inputs = out / 'inputs'
-    sources = {'source': fresh.source, 'reference': fresh.reference, 'prepared': fresh.prepared}
+    sources = {'source': prepared_inputs.source, 'reference': prepared_inputs.reference, 'prepared': prepared_inputs.prepared}
     binding = {'format': 'fresh-input-queue-v1', 'experiment_version': config['experiment_version'], 'source_commit': config['source_commit'],
-               'input_roots': {k: str(v) for k, v in sources.items()}, 'units': fresh.units, 'gates': fresh.gates}
+               'input_roots': {k: str(v) for k, v in sources.items()}, 'units': prepared_inputs.units, 'gates': prepared_inputs.gates}
     if binding_path.exists():
         saved = read_json(binding_path)
         templates = saved.pop('templates')
-        require(saved == binding and templates == fresh.contracts,
+        require(saved == binding and all(templates.get(k) == v for k, v in prepared_inputs.contracts.items()),
                 'inputs/templates changed; explicit NEW experiment version required')
         validate_config(config, read_json(out / 'config.json'))
         require(all(same_tree(source, inputs / name) for name, source in sources.items()),
@@ -332,7 +332,7 @@ def run_locked(fresh, out, config, execute, codex, output_fd, units, max_calls):
         require(set(p.name for p in out.iterdir()) == {'runner.lock'}, 'unrecognized output; choose a fresh directory')
         for name, source in sources.items():
             shutil.copytree(source, inputs / name, symlinks=True)
-        atomic_json(binding_path, {**binding, 'templates': fresh.contracts})
+        atomic_json(binding_path, {**binding, 'templates': prepared_inputs.contracts})
     atomic_json(out / 'config.json', config)
     for name in ('attempts', 'results/discovery', 'work'):
         (out / name).mkdir(parents=True, exist_ok=True)
@@ -342,7 +342,7 @@ def run_locked(fresh, out, config, execute, codex, output_fd, units, max_calls):
     hidden = [p for p in hidden if not any(p != q and p.is_relative_to(q) for q in hidden)]
     states = {'discovery': {}}
     selected = set(units) if units else {
-        f"{arm}:{unit['unit_id']}" for arm in ARMS for unit in fresh.units[arm]
+        f"{arm}:{unit['unit_id']}" for arm in ARMS for unit in prepared_inputs.units[arm]
     }
     calls_started = 0
     candidates = []
@@ -365,7 +365,7 @@ def run_locked(fresh, out, config, execute, codex, output_fd, units, max_calls):
         key, task, condition, prompt, readable, allowed, pass_no = job
         states['discovery'][key] = 'succeeded'
         for index, finding in enumerate(answer['candidates']):
-            failed = gate_failures(finding, fresh.gates, defect_kinds())
+            failed = gate_failures(finding, prepared_inputs.gates, defect_kinds())
             if failed:
                 screened.append({'cell': key, 'index': index, 'finding': finding, 'failed_gates': failed})
                 continue
@@ -442,7 +442,7 @@ def run_locked(fresh, out, config, execute, codex, output_fd, units, max_calls):
 
     for pass_no in range(1, config['passes'] + 1):
         for arm in ARMS:
-            for unit in fresh.units[arm]:
+            for unit in prepared_inputs.units[arm]:
                 for condition in config['discovery']:
                     task = {**unit, 'model': condition['model'],
                             'task_id': f"{arm}--{condition['model']}--{unit['unit_id']}"}

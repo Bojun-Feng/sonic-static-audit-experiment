@@ -13,15 +13,12 @@ class ReviewError(Exception):
 
 
 class AttemptError(ReviewError):
-    """A bounded public reason plus a private diagnostic message."""
+    """An attempt failure classified by category, stage, reason, and whether a retry can help."""
 
     def __init__(self, category, stage, reason, retryable, detail):
         super().__init__(detail)
         self.category, self.stage, self.reason = category, stage, reason
         self.retryable = retryable
-
-    def summary(self):
-        return {key: getattr(self, key) for key in ('category', 'stage', 'reason', 'retryable')}
 
 
 EXTENSIONS = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}
@@ -123,7 +120,7 @@ def validate_config(config):
     if isinstance(config, dict) and "guest_cli_versions" in config:
         fields.append("guest_cli_versions")
         versions = config["guest_cli_versions"]
-        keys(versions, ["codex"], "guest_cli_versions")
+        require(isinstance(versions, dict) and "codex" in versions, "guest_cli_versions must pin codex")
         require(all(isinstance(v, str) and re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", v)
                     for v in versions.values()),
                 "guest CLI versions must be explicit stable npm versions (X.Y.Z)")

@@ -27,7 +27,7 @@ python3 experiment/src/incremental.py --source /path/to/source \
   --out .runtime/benchmark --config experiment/incremental-config.json --execute
 ```
 
-Omit `--execute` to inspect an offline plan. Pass repeatable `--unit ARM:UNIT_ID` and `--max-calls N` to bound a run, or point `--config` at a smaller file. Rerun the identical command to skip completed cells and retry missing or failed cells. Extend the configuration to add model/effort conditions or increase `passes` for additional independent repetitions.
+Omit `--execute` to inspect an offline plan. Pass repeatable `--unit ARM:UNIT_ID` and `--max-calls N` to bound a run, or point `--config` at a smaller file. Rerun the identical command to skip completed cells and retry missing or failed cells. Change the grid by editing the conditions or `passes` in the configuration; every condition names a model and effort listed in `experiment/incremental-models.json`.
 
 ### 3. Bootstrap an isolated VM (optional)
 
@@ -41,7 +41,7 @@ Pass explicit `--create` with absolute, disjoint `--source`, `--reference`, and 
 
 ## How a run works
 
-The queue pairs every unit with every configured discovery condition, and each pass is an independent sample. Completed discoveries publish immediately. Each reported finding undergoes deterministic hard-gate screening, and admitted findings are recorded in `candidates.json`. Findings stay independent even when their claims or locations match.
+The queue pairs every unit with every configured discovery condition, and each pass is an independent sample. Each discovery publishes when it completes. Each reported finding undergoes deterministic hard-gate screening, and each admitted finding is recorded as its own candidate in `candidates.json`.
 
 Every admitted finding must satisfy all hard gates defined in `experiment/prompts/discovery.txt`, `experiment/schemas/discovery.json`, and `experiment/runner-config.json`:
 
@@ -55,7 +55,7 @@ Every admitted finding must satisfy all hard gates defined in `experiment/prompt
 
 - **Model catalog (`experiment/incremental-models.json`):** Eight Codex models, each supporting `low`, `medium`, `high`, `xhigh`, and `max` efforts and the `default` service tier.
 - **Canonical grid (`experiment/incremental-config.json`):** All eight models across all five efforts (40 conditions) over 5 passes at concurrency 16, totaling 83,000 discovery cells (415 units × 40 conditions × 5 passes).
-- **Worker isolation:** Each native invocation runs behind a worker boundary probed before the call (`bubblewrap` on Linux, `sandbox-exec` on macOS). The boundary hides the output parent (sibling results and working directories) and the original input roots, exposes the frozen input copies read-only, and gives each attempt its own scratch directory. Codex runs with a read-only native permissions profile, tool networking disabled, and its credential directory, macOS keychains, and `/proc` denied to model tools.
+- **Worker isolation:** Each native invocation runs behind a worker boundary probed before the call (`bubblewrap` on Linux, `sandbox-exec` on macOS). The boundary hides the output parent (sibling results and working directories) and the original input roots, exposes the frozen input copies read-only, and gives each attempt its own scratch directory. Codex runs with a read-only native permissions profile, tool networking disabled, and provider credential directories, configured credential roots, macOS keychains, and `/proc` denied to model tools.
 
 For full details on configuration, receipts, artifact layout, and worker boundaries, read the [independent discovery queue guide](experiment/INCREMENTAL.md).
 

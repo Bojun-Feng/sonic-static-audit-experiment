@@ -126,15 +126,15 @@ def commands(config_path, versions, profile, name=VM_NAME):
         ["limactl", "start", "--tty=false", name],
         ["limactl", "shell", "--workdir=/", name, "/bin/bash", "--noprofile", "--norc",
          "-s", "--", versions["codex"], NODE_VERSION,
-         profile["node_sha256"], profile["lima"], profile["image_sha256"], profile["arch"], *([name] if name != VM_NAME else [])],
+         profile["node_sha256"], profile["lima"], profile["image_sha256"], profile["arch"], name],
     ]
 
 
 def guest_setup_script(name=VM_NAME):
     script = (EXPERIMENT / "guest-setup.sh").read_text(encoding="utf-8")
     if name == "sonic-static-review-v2":
-        # Ship the real preflight and its dependency over the existing stdin
-        # transport. /mnt/source is the reviewed project, not this runner.
+        # Embed this repository's isolation preflight and its dependency in the
+        # stdin script; /mnt/source holds the project under review.
         marker = "probe_sources = None  # BOOTSTRAP_WORKER_ISOLATION_SOURCES"
         require(script.count(marker) == 1, "guest setup is missing its worker probe placeholder")
         sources = {module: (EXPERIMENT / "src" / module).read_text(encoding="utf-8")
@@ -148,11 +148,11 @@ def authentication_commands(name=VM_NAME):
     print(f"limactl shell --workdir=/home/audit {name} codex login --device-auth")
 
 
-def print_plan(paths, versions, guest_script, profile, allow_other_host, name=VM_NAME):
+def print_plan(paths, versions, guest_script, profile, name=VM_NAME):
     print("DRY RUN: no commands executed, downloads, files, or VM state changed.")
     print(f"Host profile: {profile['host']} (uname -s/-m).")
     if name != VM_NAME:
-        print('Host: run locally on the intended Linux/x86_64 host; no remote commands are run.')
+        print('Host: this VM profile requires a Linux/x86_64 host.')
 
     print("Host: validate absolute existing, disjoint mount directories; results must be empty.")
     print("Host: pass only PATH, HOME, USER, LOGNAME, TMPDIR, LIMA_HOME, and LC_ALL=C to Lima.")
@@ -204,11 +204,11 @@ def verify_receipt(results, versions, profile, name=VM_NAME):
             "setup receipt does not match pinned/observed versions")
 
 
-def create_vm(paths, versions, guest_script, profile, allow_other_host=False, name=VM_NAME):
+def create_vm(paths, versions, guest_script, profile, name=VM_NAME):
     require(name in (VM_NAME, 'sonic-static-review-v2'), 'unsupported VM name')
     if name != VM_NAME:
         require(profile['host'] == 'Linux/x86_64',
-                'sonic-static-review-v2 must be created locally on a Linux/x86_64 host')
+                'sonic-static-review-v2 requires a Linux/x86_64 host')
     # Pass Lima a fixed, minimal environment: provider tokens, SSH_AUTH_SOCK,
     # shell startup overrides, and proxy settings are not forwarded.
     env = {key: os.environ[key] for key in ("PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LIMA_HOME")
@@ -299,10 +299,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--dry-run", action="store_true", help="print the complete plan without mutation")
-    mode.add_argument("--create", action="store_true", help="create a fresh VM and install pinned guest CLIs")
+    mode.add_argument("--create", action="store_true", help="create a new VM and install the pinned Codex CLI")
     parser.add_argument("--name", choices=(VM_NAME, "sonic-static-review-v2"), default=VM_NAME)
-    parser.add_argument("--allow-other-host", action="store_true",
-                        help="explicitly permit creation away from host u (supported hosts only)")
     for name in ("source", "reference", "results"):
         parser.add_argument(f"--{name}", help="absolute existing directory (required for --create)")
     args = parser.parse_args(argv)
@@ -317,9 +315,9 @@ def main(argv=None):
         paths = mount_paths(values) if all(values) else tuple(map(Path, PLACEHOLDERS))
         guest_script = guest_setup_script(args.name)
         if args.dry_run:
-            print_plan(paths, versions, guest_script, profile, args.allow_other_host, args.name)
+            print_plan(paths, versions, guest_script, profile, args.name)
         else:
-            create_vm(paths, versions, guest_script, profile, args.allow_other_host, args.name)
+            create_vm(paths, versions, guest_script, profile, args.name)
     except (ReviewError, OSError, ValueError, subprocess.CalledProcessError, KeyboardInterrupt) as exc:
         print(f"ERROR: {exc or 'bootstrap interrupted'}", file=sys.stderr)
         return 1

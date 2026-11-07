@@ -21,12 +21,12 @@ python3 experiment/src/incremental.py --source /path/to/source \
   --out .runtime/benchmark --config experiment/incremental-config.json --execute
 ```
 
-The prepared root contains newly generated `exhaustive/` and `targeted/` manifest/index bundles and
-targeted source cards: 284 files and 131 groups at revision
-`2f1f7921551ae9f9c799c8b83b8a15b1d172d395`. Every configured discovery cell begins missing in an empty
-output. Omit `--execute` to plan offline. Source selection and cards are validated before scheduling.
-The frozen source may contain relative symlinks within its own tree. Exhaustive unit IDs use the frozen
-manifest order; targeted IDs come directly from the newly generated index.
+The prepared root contains the `exhaustive/` and `targeted/` manifest/index bundles and targeted source
+cards: 284 files and 131 groups at revision `2f1f7921551ae9f9c799c8b83b8a15b1d172d395`. An empty output
+starts with every configured discovery cell queued. Omit `--execute` to plan offline. Source selection
+and cards are validated before scheduling. The frozen source may contain relative symlinks within its own
+tree. Exhaustive unit IDs follow the manifest order; targeted unit IDs are the group IDs in the targeted
+index.
 
 ## Configuration
 
@@ -65,8 +65,8 @@ benchmark grid; for a bounded run, pass `--unit`/`--max-calls` or point `--confi
 ## Scheduling and resume
 
 The queue pairs every unit with every discovery condition. Up to `concurrency` independent calls run at
-once. Each completed discovery publishes immediately. Findings remain independent even when their claims
-or locations match.
+once. Each discovery publishes when it completes, and each admitted finding is recorded as its own
+candidate.
 
 Cell IDs use readable arm, unit, model, effort, and pass values. Receipts carry the same task and
 condition. Candidate IDs use the discovery cell and the finding index. Changing passes or conditions
@@ -105,7 +105,6 @@ working directories are hidden. Workers can read their assigned frozen inputs an
 scratch directory. Controller-owned pipes retain diagnostics outside worker access. Use a dedicated
 output parent such as `.runtime/benchmark`; it must not contain the CLI executable or schemas. Provider
 authentication remains host-managed: the native client can authenticate, while model tools are denied
-the Codex credential directory (`~/.codex`, or `CODEX_HOME` when set), macOS keychains, and `/proc`.
-Codex uses a read-only native permissions profile with tool networking disabled and a core-only shell
-environment.
+provider credential directories, configured credential roots, macOS keychains, and `/proc`. Codex uses
+a read-only native permissions profile with tool networking disabled and a core-only shell environment.
 These controls require the pinned standalone CLI version from `config.json`.

@@ -2,14 +2,14 @@
 # Sent on stdin to the fresh guest. Never execute this script on the host.
 set -euo pipefail
 umask 077
-[[ $# -eq 6 || $# -eq 7 ]] || { printf 'ERROR: expected six pinned setup arguments and optional VM name\n' >&2; exit 2; }
+[[ $# -eq 7 ]] || { printf 'ERROR: expected seven setup arguments\n' >&2; exit 2; }
 codex_version=$1
 node_version=$2
 node_sha256=$3
 lima_version=$4
 image_sha256=$5
 guest_arch=$6
-vm_name=${7:-sonic-static-audit}
+vm_name=$7
 [[ $vm_name == sonic-static-audit || $vm_name == sonic-static-review-v2 ]] || exit 2
 case "$guest_arch" in
     x86_64) node_arch=x64 ;;
@@ -93,15 +93,15 @@ with urllib.request.urlopen(url, timeout=60) as response, open(target, "xb") as 
 if digest.hexdigest() != expected:
     raise SystemExit("Node archive SHA-256 mismatch")
 PY
-# Install tools in /opt/audit-node and /opt/audit-clis.
+# Install tools in /opt/audit-node and /opt/audit-codex.
 sudo install -d -m 0755 /opt/audit-node
 sudo tar -xzf "$guest_work/node.tar.gz" --strip-components=1 -C /opt/audit-node
 sudo ln -s /opt/audit-node/bin/node /usr/local/bin/node
 export PATH=/opt/audit-node/bin:/usr/local/bin:/usr/bin:/bin
 [[ $(node --version) == "v$node_version" ]]
-sudo install -d -m 0755 -o "$(id -u)" -g "$(id -g)" /opt/audit-clis
+sudo install -d -m 0755 -o "$(id -u)" -g "$(id -g)" /opt/audit-codex
 # Install the pinned Codex CLI with npm lifecycle scripts disabled.
-npm install --global --prefix /opt/audit-clis --cache "$guest_work/npm-cache" \
+npm install --global --prefix /opt/audit-codex --cache "$guest_work/npm-cache" \
     --userconfig /dev/null --registry https://registry.npmjs.org \
     --ignore-scripts --no-audit --no-fund --update-notifier=false \
     "@openai/codex@$codex_version"
@@ -109,7 +109,7 @@ npm install --global --prefix /opt/audit-clis --cache "$guest_work/npm-cache" \
 # Persist update restrictions for subsequent manual guest sessions.
 cat > "$guest_work/codex" <<'SH'
 #!/bin/sh
-exec /opt/audit-clis/bin/codex -c check_for_update_on_startup=false "$@"
+exec /opt/audit-codex/bin/codex -c check_for_update_on_startup=false "$@"
 SH
 sudo install -m 0755 "$guest_work/codex" /usr/local/bin/
 node_observed=$(node --version)
@@ -127,7 +127,7 @@ import os
 import sys
 keys = ("lima", "ubuntu_sha256", "guest_arch", "node_sha256", "node_expected", "node_observed", "codex_expected",
         "codex_observed", "vm")
-values = {"status": "ready", "vm": "sonic-static-audit", **dict(zip(keys, sys.argv[1:])),
+values = {"status": "ready", **dict(zip(keys, sys.argv[1:])),
           "authentication": "not-run", "static_only": "true"}
 results = Path("/mnt/results")
 if any(results.iterdir()):

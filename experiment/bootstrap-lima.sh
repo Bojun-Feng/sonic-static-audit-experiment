@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-# Forward --name as well as creation/dry-run flags to the host-local planner.
+# Forward all arguments to the bootstrap planner.
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 command -v python3 >/dev/null 2>&1 || {

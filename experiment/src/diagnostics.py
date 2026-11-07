@@ -1,4 +1,4 @@
-"""Private attempt retention and a small OS boundary for model subprocesses."""
+"""An OS isolation boundary for model subprocesses, verified by a probe before use."""
 
 import json
 import os
