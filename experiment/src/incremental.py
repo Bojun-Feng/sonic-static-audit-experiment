@@ -323,7 +323,8 @@ def run_locked(prepared_inputs, out, config, execute, codex, output_fd, units, m
     if binding_path.exists():
         saved = read_json(binding_path)
         templates = saved.pop('templates')
-        require(saved == binding and all(templates.get(k) == v for k, v in prepared_inputs.contracts.items()),
+        require(saved == binding and isinstance(templates, dict)
+                and all(templates.get(k) == v for k, v in prepared_inputs.contracts.items()),
                 'inputs/templates changed; explicit NEW experiment version required')
         validate_config(config, read_json(out / 'config.json'))
         require(all(same_tree(source, inputs / name) for name, source in sources.items()),
@@ -340,7 +341,7 @@ def run_locked(prepared_inputs, out, config, execute, codex, output_fd, units, m
     hidden = [out.parent, *sources.values()]
     # Collapse nested masks; workers read only the frozen copies.
     hidden = [p for p in hidden if not any(p != q and p.is_relative_to(q) for q in hidden)]
-    states = {'discovery': {}}
+    states = {}
     selected = set(units) if units else {
         f"{arm}:{unit['unit_id']}" for arm in ARMS for unit in prepared_inputs.units[arm]
     }
@@ -350,9 +351,7 @@ def run_locked(prepared_inputs, out, config, execute, codex, output_fd, units, m
     pending = deque()
 
     def status():
-        cells = states['discovery']
-        value = {'discovery': {state: list(cells.values()).count(state)
-                               for state in ('queued', 'running', 'succeeded', 'failed')}}
+        value = {state: list(states.values()).count(state) for state in ('queued', 'running', 'succeeded', 'failed')}
         value.update(passes=config['passes'], cells=states, calls_started=calls_started,
                      counts={'returned': len(candidates) + len(screened),
                              'admitted': len(candidates), 'screened': len(screened)})
@@ -363,7 +362,7 @@ def run_locked(prepared_inputs, out, config, execute, codex, output_fd, units, m
 
     def accept(job, answer):
         key, task, condition, prompt, readable, allowed, pass_no = job
-        states['discovery'][key] = 'succeeded'
+        states[key] = 'succeeded'
         for index, finding in enumerate(answer['candidates']):
             failed = gate_failures(finding, prepared_inputs.gates, defect_kinds())
             if failed:
@@ -380,7 +379,7 @@ def run_locked(prepared_inputs, out, config, execute, codex, output_fd, units, m
     def enqueue(job):
         key, task, condition, prompt, readable, allowed, pass_no = job
         destination = out / 'results' / 'discovery' / key
-        states['discovery'][key] = 'queued'
+        states[key] = 'queued'
         if destination.exists():
             accept(job, read_success(destination, task, condition, pass_no, repo, prompt))
         elif execute and allowed:
@@ -395,7 +394,7 @@ def run_locked(prepared_inputs, out, config, execute, codex, output_fd, units, m
         started = time.monotonic()
         receipt = {'state': 'running', 'pass': pass_no, 'started_at': timestamp(), 'ended_at': None,
                    'duration_seconds': None, 'condition': condition, 'task': task,
-                   'usage': None}
+                   'usage': None, 'total_cost_usd': None}
         atomic_json(capture / 'attempt.json', receipt)
         (capture / 'prompt.txt').write_text(prompt)
         try:
@@ -459,7 +458,7 @@ def run_locked(prepared_inputs, out, config, execute, codex, output_fd, units, m
             while pending and len(running) < config['concurrency'] and (
                     max_calls is None or calls_started < max_calls):
                 job = pending.popleft()
-                states['discovery'][job[0]] = 'running'
+                states[job[0]] = 'running'
                 calls_started += 1
                 running[pool.submit(execute_cell, job)] = job
             status()
@@ -470,7 +469,7 @@ def run_locked(prepared_inputs, out, config, execute, codex, output_fd, units, m
                 job = running.pop(future)
                 answer = future.result()
                 if answer is None:
-                    states['discovery'][job[0]] = 'failed'
+                    states[job[0]] = 'failed'
                 else:
                     accept(job, answer)
             status()
@@ -491,7 +490,7 @@ def main():
         report = run(args.source, args.reference, args.prepared, args.out, read_json(args.config), execute=args.execute, units=args.units,
                      max_calls=args.max_calls)
         print(json.dumps({k: v for k, v in report.items() if k != 'cells'}, indent=2))
-        return int(report['discovery']['failed'] > 0)
+        return int(report['failed'] > 0)
     except (ReviewError, OSError, ValueError) as exc:
         print(f'FAIL incremental: {exc}', file=__import__('sys').stderr)
         return 1
