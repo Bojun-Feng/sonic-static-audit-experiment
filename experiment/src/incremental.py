@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fresh-input static-review queue with independent discovery and review."""
+"""Fresh-input queue of independent static-correctness discovery cells."""
 
 from pathlib import Path
 import json
@@ -17,7 +17,7 @@ from common import AttemptError, ReviewError, keys, read_json, require, within
 from model_cli import parse_codex
 from review_validation import (EXPERIMENT, runner_config, validate_answer,
                                atomic_json, defect_kinds, gate_failures)
-from model_cli import discovery_prompt, verifier_prompt
+from model_cli import discovery_prompt
 from diagnostics import verified_worker_prefix
 from datetime import datetime, timezone
 import argparse
@@ -37,7 +37,7 @@ SOURCE_COMMIT = '2f1f7921551ae9f9c799c8b83b8a15b1d172d395'
 
 
 def validate_config(value, previous=None):
-    keys(value, ['schema_version', 'experiment_version', 'source_commit', 'discovery', 'verifier',
+    keys(value, ['schema_version', 'experiment_version', 'source_commit', 'discovery',
                  'passes', 'concurrency', 'timeout_seconds'], 'incremental config')
     require(type(value['schema_version']) is int and value['schema_version'] == 1, 'unsupported config version')
     require(isinstance(value['experiment_version'], str)
@@ -45,30 +45,27 @@ def validate_config(value, previous=None):
     require(value['source_commit'] == SOURCE_COMMIT, 'source changed; explicit NEW experiment version/contract required')
     require(all(type(value[k]) is int and value[k] > 0 for k in ('passes', 'concurrency', 'timeout_seconds')),
             'passes, concurrency and timeout must be positive integers')
-    for lane in ('discovery', 'verifier'):
-        conditions = value[lane]
-        require(isinstance(conditions, list) and conditions, 'conditions must be a nonempty list')
-        seen = set()
-        for condition in conditions:
-            validate_condition(lane, condition)
-            model = condition['model']
-            identity = (model, condition['effort'])
-            require(identity not in seen, 'duplicate model/effort condition')
-            seen.add(identity)
+    conditions = value['discovery']
+    require(isinstance(conditions, list) and conditions, 'discovery conditions must be a nonempty list')
+    seen = set()
+    for condition in conditions:
+        validate_condition(condition)
+        identity = (condition['model'], condition['effort'])
+        require(identity not in seen, 'duplicate model/effort condition')
+        seen.add(identity)
     if previous:
         require(all(value[k] == previous[k] for k in ('schema_version', 'experiment_version', 'source_commit')),
                 'contract changed; use an explicit NEW experiment version and output directory')
     return value
 
 
-def validate_condition(lane, condition):
+def validate_condition(condition):
     keys(condition, ['model', 'effort', 'service_tier'], 'condition')
     require(all(isinstance(v, str) and re.fullmatch(r'[a-z0-9][a-z0-9.-]*', v)
                 for v in condition.values()), 'invalid condition identifier')
     catalog = read_json(EXPERIMENT / 'incremental-models.json')
-    provider = {'discovery': 'codex', 'verifier': 'claude'}.get(lane)
     model = condition['model']
-    require(provider and model in catalog and catalog[model]['provider'] == provider, 'unsupported model/provider')
+    require(model in catalog and catalog[model]['provider'] == 'codex', 'unsupported model/provider')
     require(condition['effort'] in catalog[model]['efforts'], 'unsupported model/effort')
     require(condition['service_tier'] == 'default'
             and condition['service_tier'] in catalog[model]['service_tiers'], 'unsupported service tier')
@@ -199,42 +196,30 @@ def invoke(command, prompt, work, timeout, output_fd, capture):
 def credential_paths():
     """Host authentication is available to the CLI, never its model tools."""
     home = Path.home()
-    paths = [home / '.codex', home / '.claude', home / '.claude.json',
-             home / 'Library/Keychains', Path('/proc')]
+    paths = [home / '.codex', home / 'Library/Keychains', Path('/proc')]
     paths += [Path(os.environ[name]).expanduser().resolve()
-              for name in ('CODEX_HOME', 'CLAUDE_CONFIG_DIR') if os.environ.get(name)]
+              for name in ('CODEX_HOME',) if os.environ.get(name)]
     return sorted(set(map(str, paths)))
 
 
-def command(lane, binary, condition, work, readable):
-    validate_condition(lane, condition)
+def command(binary, condition, work):
+    validate_condition(condition)
     model, effort = condition['model'], condition['effort']
     require(condition['service_tier'] == 'default', 'unsupported CLI service tier')
-    if lane == 'discovery':
-        return [binary, 'exec', '--model', model, '--ephemeral', '--json', '--ignore-user-config',
-                '--ignore-rules', '--skip-git-repo-check', '--strict-config',
-                '-c', 'default_permissions="review"',
-                '-c', 'permissions.review.filesystem={' + ','.join(
-                    json.dumps(path) + '=' + json.dumps(mode)
-                    for path, mode in [('/', 'read'), *[(p, 'deny') for p in credential_paths()]]) + '}',
-                '-c', 'permissions.review.network.enabled=false',
-                '-c', 'shell_environment_policy.inherit="core"',
-                '--color', 'never', '--cd', str(work), '-c', f'model_reasoning_effort="{effort}"',
-                '-c', 'approval_policy="never"', '-c', 'web_search="disabled"',
-                '-c', 'features.multi_agent=false', '-c', 'features.apps=false',
-                '-c', 'project_doc_max_bytes=0', '-c', 'check_for_update_on_startup=false',
-                '--output-schema', str(EXPERIMENT / 'schemas/discovery.json'),
-                '--output-last-message', str(work / 'answer.json'), '-']
-    return [binary, '--print', '--model', model, '--effort', effort, '--output-format', 'stream-json',
-            '--verbose', '--no-session-persistence', '--safe-mode', '--strict-mcp-config',
-            '--mcp-config', '{"mcpServers":{}}', '--settings', json.dumps({
-                'disableAllHooks': True, 'permissions': {'deny': [
-                    f'{tool}(/{path}{suffix})' for path in credential_paths()
-                    for suffix in ('', '/**') for tool in ('Read', 'Grep', 'Glob')]}}),
-            '--setting-sources', '', '--tools', 'Read,Grep,Glob', '--allowedTools', 'Read,Grep,Glob',
-            '--permission-mode', 'dontAsk', '--disable-slash-commands', '--json-schema',
-            (EXPERIMENT / 'schemas/verifier.json').read_text(),
-            *[part for path in readable for part in ('--add-dir', str(path))]]
+    return [binary, 'exec', '--model', model, '--ephemeral', '--json', '--ignore-user-config',
+            '--ignore-rules', '--skip-git-repo-check', '--strict-config',
+            '-c', 'default_permissions="review"',
+            '-c', 'permissions.review.filesystem={' + ','.join(
+                json.dumps(path) + '=' + json.dumps(mode)
+                for path, mode in [('/', 'read'), *[(p, 'deny') for p in credential_paths()]]) + '}',
+            '-c', 'permissions.review.network.enabled=false',
+            '-c', 'shell_environment_policy.inherit="core"',
+            '--color', 'never', '--cd', str(work), '-c', f'model_reasoning_effort="{effort}"',
+            '-c', 'approval_policy="never"', '-c', 'web_search="disabled"',
+            '-c', 'features.multi_agent=false', '-c', 'features.apps=false',
+            '-c', 'project_doc_max_bytes=0', '-c', 'check_for_update_on_startup=false',
+            '--output-schema', str(EXPERIMENT / 'schemas/discovery.json'),
+            '--output-last-message', str(work / 'answer.json'), '-']
 
 
 def parse_discovery(events, answer, condition):
@@ -248,28 +233,6 @@ def parse_discovery(events, answer, condition):
                     require(event[field] == condition[field], f'discovery {field} mismatch')
                     metadata['observed_' + field] = event[field]
     return metadata
-
-
-def parse_review(events, condition):
-    initial = [e for e in events if e.get('type') == 'system' and e.get('subtype') == 'init']
-    final = [e for e in events if e.get('type') == 'result']
-    require(len(initial) == len(final) == 1 and events[-1] == final[0],
-            'incomplete verifier session')
-    init, result = initial[0], final[0]
-    preamble = events[:events.index(init)]
-    require(all(e.get('type') == 'system' and e.get('subtype') == 'ui_invalidate'
-                and e.get('session_id') == init.get('session_id') for e in preamble),
-            'unexpected verifier preamble')
-    require(init.get('model') == condition['model'], 'verifier model mismatch')
-    require('effort' not in init or init['effort'] == condition['effort'], 'verifier effort mismatch')
-    require(result.get('subtype') == 'success' and result.get('is_error') is False
-            and isinstance(result.get('structured_output'), dict), 'unsuccessful verifier result')
-    require(isinstance(result.get('session_id'), str) and result['session_id']
-            and result['session_id'] == init.get('session_id'), 'verifier session mismatch')
-    metadata = {'session_id': result['session_id'], 'observed_model': init['model'], 'usage': result.get('usage')}
-    metadata.update({k: result[k] for k in ('modelUsage', 'total_cost_usd', 'duration_ms', 'duration_api_ms', 'num_turns')
-                     if k in result})
-    return result['structured_output'], metadata
 
 
 def tree_files(root):
@@ -306,7 +269,7 @@ def publish(directory, task, condition, pass_no, answer, metadata, source, origi
         staged.rename(directory)
 
 
-def read_success(directory, task, condition, pass_no, lane, repo, gates, prompt):
+def read_success(directory, task, condition, pass_no, repo, prompt):
     completion = read_json(directory / 'completion.json')
     require(completion['task'] == task and completion['condition'] == condition
             and completion['pass'] == pass_no, 'completed cell identity changed')
@@ -316,24 +279,20 @@ def read_success(directory, task, condition, pass_no, lane, repo, gates, prompt)
     keys(origin, ['kind', 'attempt'], 'completion origin')
     require(origin['kind'] == 'native', 'completion must be a native queue attempt')
     attempt = within(directory.parents[2], origin['attempt'])
-    require(attempt.parent == directory.parents[2] / 'attempts' / lane / directory.name
+    require(attempt.parent == directory.parents[2] / 'attempts' / 'discovery' / directory.name
             and (attempt / 'attempt.json').is_file(), 'completion attempt missing or outside its cell')
     answer = read_json(directory / 'result.json')
     events = events_at(directory)
-    if lane == 'discovery':
-        native = parse_discovery(events, answer, condition)
-    else:
-        parsed, native = parse_review(events, condition)
-        require(parsed == answer, 'verdict disagrees with native result')
+    native = parse_discovery(events, answer, condition)
     metadata = read_json(directory / 'metadata.json')
     require(completion['session_id'] == native['session_id']
             and all(metadata.get(k) == v for k, v in native.items()), 'completion metadata mismatch')
-    validate_answer(answer, repo, lane, task, {'gates': gates})
+    validate_answer(answer, repo)
     return answer
 
 
-def run(source, reference, prepared, out, config, *, execute=False, codex='codex', claude='claude',
-        units=None, max_calls=None, discovery_only=False):
+def run(source, reference, prepared, out, config, *, execute=False, codex='codex',
+        units=None, max_calls=None):
     """Plan missing cells offline; execute only when explicitly requested."""
     validate_config(config)
     fresh = FreshInputs(source, reference, prepared)
@@ -354,11 +313,10 @@ def run(source, reference, prepared, out, config, *, execute=False, codex='codex
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise ReviewError('another runner owns this output') from exc
-        return run_locked(fresh, out, config, execute, {'discovery': codex, 'verifier': claude}, lock.fileno(),
-                          units, max_calls, discovery_only)
+        return run_locked(fresh, out, config, execute, codex, lock.fileno(), units, max_calls)
 
 
-def run_locked(fresh, out, config, execute, binaries, output_fd, units, max_calls, discovery_only=False):
+def run_locked(fresh, out, config, execute, codex, output_fd, units, max_calls):
     binding_path = out / 'experiment.json'
     inputs = out / 'inputs'
     sources = {'source': fresh.source, 'reference': fresh.reference, 'prepared': fresh.prepared}
@@ -378,13 +336,13 @@ def run_locked(fresh, out, config, execute, binaries, output_fd, units, max_call
             shutil.copytree(source, inputs / name, symlinks=True)
         atomic_json(binding_path, {**binding, 'templates': fresh.contracts})
     atomic_json(out / 'config.json', config)
-    for name in ('attempts', 'results/discovery', 'results/verifier', 'validation', 'work'):
+    for name in ('attempts', 'results/discovery', 'work'):
         (out / name).mkdir(parents=True, exist_ok=True)
     repo, reference, prepared = (inputs / name for name in ('source', 'reference', 'prepared'))
     hidden = [out.parent, *sources.values()]
     # Collapse nested masks; workers read only the frozen copies.
     hidden = [p for p in hidden if not any(p != q and p.is_relative_to(q) for q in hidden)]
-    states = {'discovery': {}, 'verifier': {}}
+    states = {'discovery': {}}
     selected = set(units) if units else {
         f"{arm}:{unit['unit_id']}" for arm in ARMS for unit in fresh.units[arm]
     }
@@ -394,9 +352,9 @@ def run_locked(fresh, out, config, execute, binaries, output_fd, units, max_call
     pending = deque()
 
     def status():
-        value = {lane: {state: list(values.values()).count(state)
-                       for state in ('queued', 'running', 'succeeded', 'failed')}
-                 for lane, values in states.items()}
+        cells = states['discovery']
+        value = {'discovery': {state: list(cells.values()).count(state)
+                               for state in ('queued', 'running', 'succeeded', 'failed')}}
         value.update(passes=config['passes'], cells=states, calls_started=calls_started,
                      counts={'returned': len(candidates) + len(screened),
                              'admitted': len(candidates), 'screened': len(screened)})
@@ -406,10 +364,8 @@ def run_locked(fresh, out, config, execute, binaries, output_fd, units, max_call
         return value
 
     def accept(job, answer):
-        lane, key, task, condition, prompt, readable, allowed, pass_no = job
-        states[lane][key] = 'succeeded'
-        if lane != 'discovery':
-            return
+        key, task, condition, prompt, readable, allowed, pass_no = job
+        states['discovery'][key] = 'succeeded'
         for index, finding in enumerate(answer['candidates']):
             failed = gate_failures(finding, fresh.gates, defect_kinds())
             if failed:
@@ -422,31 +378,19 @@ def run_locked(fresh, out, config, execute, binaries, output_fd, units, max_call
                          'arm': task['mode'], 'unit': task['unit_id'],
                          'condition': condition, 'finding': finding}
             candidates.append(candidate)
-            validation = {k: finding[k] for k in ('path', 'start_line', 'end_line', 'defect_kind')}
-            validation.update(id=candidate_id, claims=[{k: finding[k] for k in ('title', 'root_cause')}])
-            directory = out / 'validation' / candidate_id
-            directory.mkdir(exist_ok=True)
-            path = directory / 'validation-input.json'
-            atomic_json(path, validation)
-            for reviewer in config['verifier']:
-                review_key = '--'.join((candidate_id, reviewer['model'], reviewer['effort']))
-                review_task = {'task_id': review_key, 'path': finding['path'], 'candidate': candidate_id}
-                enqueue(('verifier', review_key, review_task, reviewer,
-                         verifier_prompt(path, repo, reference), [repo, reference, directory], allowed, pass_no))
 
     def enqueue(job):
-        lane, key, task, condition, prompt, readable, allowed, pass_no = job
-        destination = out / 'results' / lane / key
-        states[lane][key] = 'queued'
+        key, task, condition, prompt, readable, allowed, pass_no = job
+        destination = out / 'results' / 'discovery' / key
+        states['discovery'][key] = 'queued'
         if destination.exists():
-            accept(job, read_success(destination, task, condition, pass_no, lane, repo, fresh.gates, prompt))
-        elif execute and allowed and (lane == 'discovery' or not discovery_only):
-            # Reviews can run as soon as their discovery publishes.
-            (pending.appendleft if lane == 'verifier' else pending.append)(job)
+            accept(job, read_success(destination, task, condition, pass_no, repo, prompt))
+        elif execute and allowed:
+            pending.append(job)
 
     def execute_cell(job):
-        lane, key, task, condition, prompt, readable, allowed, pass_no = job
-        attempts = out / 'attempts' / lane / key
+        key, task, condition, prompt, readable, allowed, pass_no = job
+        attempts = out / 'attempts' / 'discovery' / key
         attempts.mkdir(parents=True, exist_ok=True)
         capture = Path(tempfile.mkdtemp(prefix='attempt-', dir=attempts))
         work = Path(tempfile.mkdtemp(prefix='session-', dir=out / 'work'))
@@ -457,25 +401,22 @@ def run_locked(fresh, out, config, execute, binaries, output_fd, units, max_call
         atomic_json(capture / 'attempt.json', receipt)
         (capture / 'prompt.txt').write_text(prompt)
         try:
-            binary = shutil.which(binaries[lane])
+            binary = shutil.which(codex)
             require(binary is not None, 'CLI executable missing')
             require(not any(Path(binary).resolve().is_relative_to(p) for p in hidden),
                     'CLI is inside hidden inputs/results')
             prefix = verified_worker_prefix(out / 'attempts', hidden=hidden, exposed=readable,
                                             writable=[work], probe_dir=out / 'work')
-            argv = command(lane, binary, condition, work, readable)
+            argv = command(binary, condition, work)
             receipt['argv'] = argv
             receipt['invoked_at'] = timestamp()
             atomic_json(capture / 'attempt.json', receipt)
             events = invoke([*prefix, *argv], prompt, work, config['timeout_seconds'], output_fd, capture)
             receipt['returncode'] = 0
-            if lane == 'discovery':
-                answer = read_json(work / 'answer.json')
-                metadata = parse_discovery(events, answer, condition)
-            else:
-                answer, metadata = parse_review(events, condition)
+            answer = read_json(work / 'answer.json')
+            metadata = parse_discovery(events, answer, condition)
             receipt.update(metadata)
-            validate_answer(answer, repo, lane, task, {'gates': fresh.gates})
+            validate_answer(answer, repo)
             receipt.update(state='succeeded', ended_at=timestamp(), duration_seconds=time.monotonic() - started)
             metadata['pass'] = pass_no
             metadata.update(condition=condition, started_at=receipt['started_at'],
@@ -483,7 +424,7 @@ def run_locked(fresh, out, config, execute, binaries, output_fd, units, max_call
             atomic_json(capture / 'result.json', answer)
             atomic_json(capture / 'metadata.json', metadata)
             atomic_json(capture / 'attempt.json', receipt)
-            publish(out / 'results' / lane / key, task, condition, pass_no, answer, metadata, capture,
+            publish(out / 'results' / 'discovery' / key, task, condition, pass_no, answer, metadata, capture,
                     {'kind': 'native', 'attempt': str(capture.relative_to(out))})
             return answer
         except (ReviewError, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
@@ -510,7 +451,7 @@ def run_locked(fresh, out, config, execute, binaries, output_fd, units, max_call
                     if arm == 'targeted':
                         group = prepared / arm / 'groups' / unit['unit_id']
                         task.update(source_card=str(group / 'source-card.md'), scope=str(group / 'scope.json'))
-                    enqueue(('discovery', cell_id(task, condition, pass_no), task, condition,
+                    enqueue((cell_id(task, condition, pass_no), task, condition,
                              discovery_prompt(task, repo, reference), [repo, reference, prepared],
                              f"{arm}:{unit['unit_id']}" in selected, pass_no))
     status()
@@ -520,7 +461,7 @@ def run_locked(fresh, out, config, execute, binaries, output_fd, units, max_call
             while pending and len(running) < config['concurrency'] and (
                     max_calls is None or calls_started < max_calls):
                 job = pending.popleft()
-                states[job[0]][job[1]] = 'running'
+                states['discovery'][job[0]] = 'running'
                 calls_started += 1
                 running[pool.submit(execute_cell, job)] = job
             status()
@@ -531,7 +472,7 @@ def run_locked(fresh, out, config, execute, binaries, output_fd, units, max_call
                 job = running.pop(future)
                 answer = future.result()
                 if answer is None:
-                    states[job[0]][job[1]] = 'failed'
+                    states['discovery'][job[0]] = 'failed'
                 else:
                     accept(job, answer)
             status()
@@ -544,16 +485,15 @@ def main():
         parser.add_argument('--' + name, required=True, type=Path)
     parser.add_argument('--out', required=True, type=Path)
     parser.add_argument('--config', type=Path, default=EXPERIMENT / 'incremental-config.json')
-    parser.add_argument('--execute', action='store_true', help='invoke providers for missing cells (default: offline plan)')
-    parser.add_argument('--discovery-only', action='store_true', help='defer missing reviews while running discovery')
+    parser.add_argument('--execute', action='store_true', help='invoke the provider for missing cells (default: offline plan)')
     parser.add_argument('--unit', action='append', dest='units', help='exact frozen ARM:UNIT_ID (repeatable)')
     parser.add_argument('--max-calls', type=int, help='maximum cells attempted this invocation')
     args = parser.parse_args()
     try:
         report = run(args.source, args.reference, args.prepared, args.out, read_json(args.config), execute=args.execute, units=args.units,
-                     max_calls=args.max_calls, discovery_only=args.discovery_only)
+                     max_calls=args.max_calls)
         print(json.dumps({k: v for k, v in report.items() if k != 'cells'}, indent=2))
-        return int(any(report[lane]['failed'] for lane in ('discovery', 'verifier') if lane in report))
+        return int(report['discovery']['failed'] > 0)
     except (ReviewError, OSError, ValueError) as exc:
         print(f'FAIL incremental: {exc}', file=__import__('sys').stderr)
         return 1

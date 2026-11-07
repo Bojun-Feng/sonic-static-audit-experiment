@@ -2,15 +2,14 @@
 # Sent on stdin to the fresh guest. Never execute this script on the host.
 set -euo pipefail
 umask 077
-[[ $# -eq 7 || $# -eq 8 ]] || { printf 'ERROR: expected seven pinned setup arguments and optional VM name\n' >&2; exit 2; }
+[[ $# -eq 6 || $# -eq 7 ]] || { printf 'ERROR: expected six pinned setup arguments and optional VM name\n' >&2; exit 2; }
 codex_version=$1
-claude_version=$2
-node_version=$3
-node_sha256=$4
-lima_version=$5
-image_sha256=$6
-guest_arch=$7
-vm_name=${8:-sonic-static-audit}
+node_version=$2
+node_sha256=$3
+lima_version=$4
+image_sha256=$5
+guest_arch=$6
+vm_name=${7:-sonic-static-audit}
 [[ $vm_name == sonic-static-audit || $vm_name == sonic-static-review-v2 ]] || exit 2
 case "$guest_arch" in
     x86_64) node_arch=x64 ;;
@@ -29,7 +28,7 @@ guest_work=$(mktemp -d /tmp/review-setup.XXXXXXXX)
 trap 'rm -rf -- "$guest_work"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM HUP
-export DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+export DISABLE_AUTOUPDATER=1
 
 # Worker isolation for the sonic-static-review-v2 profile.
 if [[ $vm_name == sonic-static-review-v2 ]]; then
@@ -102,45 +101,33 @@ sudo ln -s /opt/audit-node/bin/node /usr/local/bin/node
 export PATH=/opt/audit-node/bin:/usr/local/bin:/usr/bin:/bin
 [[ $(node --version) == "v$node_version" ]]
 sudo install -d -m 0755 -o "$(id -u)" -g "$(id -g)" /opt/audit-clis
-# Codex installs without lifecycle scripts. Claude Code requires its official postinstall
-# to fetch the pinned platform binary, so install it separately with scripts enabled.
+# Codex installs without lifecycle scripts.
 npm install --global --prefix /opt/audit-clis --cache "$guest_work/npm-cache" \
     --userconfig /dev/null --registry https://registry.npmjs.org \
     --ignore-scripts --no-audit --no-fund --update-notifier=false \
     "@openai/codex@$codex_version"
-npm install --global --prefix /opt/audit-clis --cache "$guest_work/npm-cache" \
-    --userconfig /dev/null --registry https://registry.npmjs.org \
-    --no-audit --no-fund --update-notifier=false \
-    "@anthropic-ai/claude-code@$claude_version"
 
-# Persist update/telemetry restrictions for subsequent manual guest sessions.
+# Persist update restrictions for subsequent manual guest sessions.
 cat > "$guest_work/codex" <<'SH'
 #!/bin/sh
 exec /opt/audit-clis/bin/codex -c check_for_update_on_startup=false "$@"
 SH
-cat > "$guest_work/claude" <<'SH'
-#!/bin/sh
-export DISABLE_AUTOUPDATER=1 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
-exec /opt/audit-clis/bin/claude "$@"
-SH
-sudo install -m 0755 "$guest_work/codex" "$guest_work/claude" /usr/local/bin/
+sudo install -m 0755 "$guest_work/codex" /usr/local/bin/
 node_observed=$(node --version)
 codex_observed=$(codex --version)
-claude_observed=$(claude --version)
 [[ $codex_observed == "codex-cli $codex_version" ]]
-[[ $claude_observed == "$claude_version (Claude Code)" ]]
 
 # Publish the only result after all installations, version checks, and any
 # required worker isolation probe succeed.
 # Exclusive creation prevents overwriting existing results; host cleanup removes
 # an incomplete receipt on any subsequent failure, including lost transport.
 python3 - "$lima_version" "$image_sha256" "$guest_arch" "$node_sha256" "$node_version" "$node_observed" \
-    "$codex_version" "$codex_observed" "$claude_version" "$claude_observed" "$vm_name" <<'PY'
+    "$codex_version" "$codex_observed" "$vm_name" <<'PY'
 from pathlib import Path
 import os
 import sys
 keys = ("lima", "ubuntu_sha256", "guest_arch", "node_sha256", "node_expected", "node_observed", "codex_expected",
-        "codex_observed", "claude_code_expected", "claude_code_observed", "vm")
+        "codex_observed", "vm")
 values = {"status": "ready", "vm": "sonic-static-audit", **dict(zip(keys, sys.argv[1:])),
           "authentication": "not-run", "static_only": "true"}
 results = Path("/mnt/results")

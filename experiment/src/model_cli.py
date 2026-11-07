@@ -11,13 +11,6 @@ def discovery_prompt(task, repo, reference):
     return (EXPERIMENT / "prompts/discovery.txt").read_text() + "\nReview context:\n" + json_bytes(context).decode()
 
 
-def verifier_prompt(validation_input, repo, reference):
-    """Render one blinded validation input with source and reference paths."""
-    context = {"validation_input": str(validation_input), "source_root": str(repo), "reference_root": str(reference)}
-    return (EXPERIMENT / "prompts/verifier.txt").read_text() + "\nVerification context:\n" + json_bytes(context).decode()
-
-
-
 def parse_codex(events, answer):
     require(events and all(isinstance(e, dict) for e in events), "empty or invalid Codex events")
     started = [e for e in events if e.get("type") == "thread.started"]

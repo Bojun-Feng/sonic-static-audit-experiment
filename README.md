@@ -1,17 +1,25 @@
 # SONiC static correctness benchmark
 
-A configuration-driven queue for static SONiC SWSS review. The frozen inventory
-contains 284 exhaustive files and 131 targeted source-card groups at revision
-`2f1f7921551ae9f9c799c8b83b8a15b1d172d395`.
+The SONiC static correctness benchmark is a configuration-driven queue that runs independent static correctness reviews of SONiC SWSS Routing working-group source (routes, next hops, neighbors, IP interfaces, VRF, VXLAN/EVPN L3, and IP tunnels) through standalone Codex CLIs.
 
-Each unit pairs with every configured discovery model/effort condition. Completed
-discoveries publish independently, pass through hard-gate screening, and enqueue
-each admitted finding for every reviewer condition. Calls share a small concurrency
-limit. Findings remain independent even when their claims or locations match.
+Each discovery cell is one model, at one reasoning effort, reviewing one source unit on one pass. The reviewed inventory is frozen at source revision `2f1f7921551ae9f9c799c8b83b8a15b1d172d395`: 284 `exhaustive` files and 131 `targeted` source-card groups (415 units total).
 
-## Run
+## Quick start
 
-With standalone Codex and Claude CLIs available:
+### 1. Prepare inputs
+
+Preparation requires Python 3.10 or newer, Bash, and a source checkout matching `experiment/config.json` (`ast-grep` is optional). Source and output directories must be disjoint.
+
+```sh
+./experiment/run-experiment.sh prepare exhaustive --repo /path/to/source --out /path/to/prepared/exhaustive
+./experiment/run-experiment.sh prepare targeted --repo /path/to/source --out /path/to/prepared/targeted
+```
+
+Use `targeted` to generate source-card groups. Pass `--config FILE` to select a profile and `--identity FILE` to supply a snapshot identity attestation. Selection records source provenance and excludes nonproduction files, extraction creates numbered source cards, and validation checks source bytes and inventories.
+
+### 2. Run the queue
+
+With the standalone Codex CLI (`0.164.0`) available, start the queue from the repository root:
 
 ```sh
 python3 experiment/src/incremental.py --source /path/to/source \
@@ -19,42 +27,38 @@ python3 experiment/src/incremental.py --source /path/to/source \
   --out .runtime/benchmark --config experiment/incremental-config.json --execute
 ```
 
-Omit `--execute` for offline planning. Rerun the identical command to
-skip completed cells and retry missing or failed cells. Extend the configuration
-to add model/effort conditions or increase `passes` for independent repetitions.
-Optional `--unit ARM:UNIT_ID` and `--max-calls N` bound a run. See
-[the queue guide](experiment/INCREMENTAL.md) for configuration, receipts, and
-isolation requirements.
+Omit `--execute` to inspect an offline plan. Pass repeatable `--unit ARM:UNIT_ID` and `--max-calls N` to bound a run, or point `--config` at a smaller file. Rerun the identical command to skip completed cells and retry missing or failed cells. Extend the configuration to add model/effort conditions or increase `passes` for additional independent repetitions.
 
-Hard gates require Routing working-group ownership, a supported defect kind,
-clear intended behavior and reachable impact, one obvious deterministic fix in
-one file, and 5/5 confidence in defect and remedy. Prompts, schemas, and
-`experiment/runner-config.json` define the static review contract.
+### 3. Bootstrap an isolated VM (optional)
 
-## Prepare inputs
-
-Preparation uses Python, Bash, and a source checkout matching
-`experiment/config.json`. `ast-grep` is optional.
-
-```sh
-./experiment/run-experiment.sh prepare exhaustive --repo /path/to/source --out /path/to/prepared/exhaustive
-./experiment/run-experiment.sh prepare targeted --repo /path/to/source --out /path/to/prepared/targeted
-```
-
-Use `targeted` for source-card groups. `--config FILE` selects a profile;
-`--identity FILE` supplies a snapshot identity attestation. Source and output
-must be disjoint. Changed inputs or incomplete preparation need a fresh output.
-Selection records source provenance and excludes nonproduction files. Extraction
-creates numbered source cards; validation checks source bytes and inventories.
-
-## Bootstrap
+Preview or provision a fresh Lima VM with pinned downloads:
 
 ```sh
 ./experiment/bootstrap-lima.sh --dry-run
 ```
 
-Explicit `--create` provisions a fresh Lima VM using pinned downloads. Supported
-hosts are Linux/x86_64 with Lima 2.0.3/QEMU and macOS/arm64 with Lima 2.2.1/VZ.
-Supply absolute, disjoint `--source`, `--reference`, and empty `--results`
-directories. Source and references mount read-only; existing VMs are refused.
-Authentication is a separate manual step. Bootstrap never launches reviews.
+Pass explicit `--create` with absolute, disjoint `--source`, `--reference`, and empty `--results` directories to provision the VM. Supported hosts are Linux/x86_64 with Lima 2.0.3/QEMU and macOS/arm64 with Lima 2.2.1/VZ. Source and reference directories mount read-only, and existing VMs are refused. Authentication is a separate manual step; bootstrap never launches a review.
+
+## How a run works
+
+The queue pairs every unit with every configured discovery condition, and each pass is an independent sample. Completed discoveries publish immediately. Each reported finding undergoes deterministic hard-gate screening, and admitted findings are recorded in `candidates.json`. Findings stay independent even when their claims or locations match; there is no merging.
+
+Every admitted finding must satisfy all hard gates defined in `experiment/prompts/discovery.txt`, `experiment/schemas/discovery.json`, and `experiment/runner-config.json`:
+
+- Routing working-group ownership.
+- A supported `defect_kind` from the discovery schema.
+- Clear intended behavior and a reachable impact.
+- One obvious deterministic fix in one file (`files_touched` equal to `1`).
+- 5/5 confidence in both the defect and the remedy.
+
+## Configuration and isolation
+
+- **Model catalog (`experiment/incremental-models.json`):** Eight Codex models, each supporting `low`, `medium`, `high`, `xhigh`, and `max` efforts and the `default` service tier.
+- **Canonical grid (`experiment/incremental-config.json`):** All eight models across all five efforts (40 conditions) over 5 passes at concurrency 16, totaling 83,000 discovery cells (415 units × 40 conditions × 5 passes).
+- **Worker isolation:** Each native invocation runs behind a checked worker boundary (`bubblewrap` on Linux, `sandbox-exec` on macOS). Workers read only their assigned frozen inputs and write only to their own scratch directory.
+
+For full details on configuration, receipts, artifact layout, and worker boundaries, read the [independent discovery queue guide](experiment/INCREMENTAL.md).
+
+## License
+
+Released under the [MIT License](LICENSE).

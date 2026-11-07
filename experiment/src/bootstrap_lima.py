@@ -116,7 +116,6 @@ ssh:
 propagateProxyEnv: false
 env:
   DISABLE_AUTOUPDATER: "1"
-  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
 portForwards:
   - guestPortRange: [1, 65535]
     ignore: true
@@ -128,7 +127,7 @@ def commands(config_path, versions, profile, name=VM_NAME):
         ["limactl", "create", "--tty=false", f"--name={name}", str(config_path)],
         ["limactl", "start", "--tty=false", name],
         ["limactl", "shell", "--workdir=/", name, "/bin/bash", "--noprofile", "--norc",
-         "-s", "--", versions["codex"], versions["claude_code"], NODE_VERSION,
+         "-s", "--", versions["codex"], NODE_VERSION,
          profile["node_sha256"], profile["lima"], profile["image_sha256"], profile["arch"], *([name] if name != VM_NAME else [])],
     ]
 
@@ -149,7 +148,6 @@ def guest_setup_script(name=VM_NAME):
 def authentication_commands(name=VM_NAME):
     print("Manual authentication only (run later; never run by bootstrap):")
     print(f"limactl shell --workdir=/home/audit {name} codex login --device-auth")
-    print(f"limactl shell --workdir=/home/audit {name} claude auth login")
 
 
 def print_plan(paths, versions, guest_script, profile, allow_other_host, name=VM_NAME):
@@ -192,8 +190,6 @@ def expected_receipt(versions, profile, name=VM_NAME):
         "node_sha256": profile["node_sha256"],
         "node_expected": NODE_VERSION, "node_observed": f"v{NODE_VERSION}",
         "codex_expected": versions["codex"], "codex_observed": f"codex-cli {versions['codex']}",
-        "claude_code_expected": versions["claude_code"],
-        "claude_code_observed": f"{versions['claude_code']} (Claude Code)",
         "authentication": "not-run", "static_only": "true",
     }
 

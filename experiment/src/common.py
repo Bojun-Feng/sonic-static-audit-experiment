@@ -123,7 +123,7 @@ def validate_config(config):
     if isinstance(config, dict) and "guest_cli_versions" in config:
         fields.append("guest_cli_versions")
         versions = config["guest_cli_versions"]
-        keys(versions, ["codex", "claude_code"], "guest_cli_versions")
+        keys(versions, ["codex"], "guest_cli_versions")
         require(all(isinstance(v, str) and re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", v)
                     for v in versions.values()),
                 "guest CLI versions must be explicit stable npm versions (X.Y.Z)")

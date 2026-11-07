@@ -1,6 +1,6 @@
 {
   "profile": "sonic-swss-routing-interface",
-  "guest_cli_versions": {"codex": "0.164.0", "claude_code": "2.1.302"},
+  "guest_cli_versions": {"codex": "0.164.0"},
   "intended_source_commit": "2f1f7921551ae9f9c799c8b83b8a15b1d172d395",
   "source_roots": ["cfgmgr", "fpmsyncd", "orchagent", "portsyncd"],
   "domain_anchors": ["interface", "intf", "neigh", "nexthop", "port", "route", "routing", "vlan", "vnet", "vrf", "vxlan"],
