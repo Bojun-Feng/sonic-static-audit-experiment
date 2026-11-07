@@ -177,7 +177,7 @@ def print_plan(paths, versions, guest_script, profile, name=VM_NAME):
     print("Host: remove private scratch on success and failure.")
     print(f"On create/start/setup/receipt failure or interruption: limactl delete --force {name}")
     print("Remove any incomplete setup-receipt.txt. A retry starts from scratch, never repairs a VM.")
-    print("Static-only: no source execution, builds/tests, Docker, virtual switches, or model agents.")
+    print("Static-only: source and references mount read-only; bootstrap runs only the steps above.")
     authentication_commands(name)
 
 

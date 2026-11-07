@@ -48,7 +48,7 @@ Every admitted finding must satisfy all hard gates defined in `experiment/prompt
 - Routing working-group ownership.
 - A supported `defect_kind` from the discovery schema.
 - Clear intended behavior and a reachable impact.
-- One obvious deterministic fix in one file (`files_touched` equal to `1`) that changes at most 50 logic lines (`max_fix_logic_lines` equal to `50`, tests excluded).
+- One obvious deterministic fix in one file (`files_touched` equal to `1`) that changes at most 50 logic lines.
 - 5/5 confidence in both the defect and the remedy.
 
 ## Configuration and isolation
