@@ -224,8 +224,6 @@ def command(binary, condition, work):
 
 def parse_discovery(events, answer, condition):
     metadata = parse_codex(events, answer)
-    if 'duration_ms' in events[-1]:
-        metadata['duration_ms'] = events[-1]['duration_ms']
     for event in events:
         if event.get('type') in ('thread.started', 'turn.started'):
             for field in ('model', 'effort'):
