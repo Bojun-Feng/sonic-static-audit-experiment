@@ -19,7 +19,7 @@ if [[ ${1:-} == --help || ${1:-} == -h ]]; then
 fi
 [[ $# -ge 2 ]] || { usage >&2; exit 2; }
 action=$1
-[[ $action == prepare ]] || fail 'only prepare is supported; use experiment/src/incremental.py for the benchmark'
+[[ $action == prepare ]] || { usage >&2; exit 2; }
 mode=$2
 [[ $mode == exhaustive || $mode == targeted ]] || fail 'mode must be exhaustive or targeted'
 shift 2

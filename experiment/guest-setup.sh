@@ -28,7 +28,6 @@ guest_work=$(mktemp -d /tmp/review-setup.XXXXXXXX)
 trap 'rm -rf -- "$guest_work"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM HUP
-export DISABLE_AUTOUPDATER=1
 
 # Worker isolation for the sonic-static-review-v2 profile.
 if [[ $vm_name == sonic-static-review-v2 ]]; then
@@ -101,7 +100,7 @@ sudo ln -s /opt/audit-node/bin/node /usr/local/bin/node
 export PATH=/opt/audit-node/bin:/usr/local/bin:/usr/bin:/bin
 [[ $(node --version) == "v$node_version" ]]
 sudo install -d -m 0755 -o "$(id -u)" -g "$(id -g)" /opt/audit-clis
-# Codex installs without lifecycle scripts.
+# Install the pinned Codex CLI with npm lifecycle scripts disabled.
 npm install --global --prefix /opt/audit-clis --cache "$guest_work/npm-cache" \
     --userconfig /dev/null --registry https://registry.npmjs.org \
     --ignore-scripts --no-audit --no-fund --update-notifier=false \

@@ -65,7 +65,7 @@ def validate_condition(condition):
                 for v in condition.values()), 'invalid condition identifier')
     catalog = read_json(EXPERIMENT / 'incremental-models.json')
     model = condition['model']
-    require(model in catalog and catalog[model]['provider'] == 'codex', 'unsupported model/provider')
+    require(model in catalog, 'unsupported model')
     require(condition['effort'] in catalog[model]['efforts'], 'unsupported model/effort')
     require(condition['service_tier'] == 'default'
             and condition['service_tier'] in catalog[model]['service_tiers'], 'unsupported service tier')
@@ -197,8 +197,8 @@ def credential_paths():
     """Host authentication is available to the CLI, never its model tools."""
     home = Path.home()
     paths = [home / '.codex', home / 'Library/Keychains', Path('/proc')]
-    paths += [Path(os.environ[name]).expanduser().resolve()
-              for name in ('CODEX_HOME',) if os.environ.get(name)]
+    if os.environ.get('CODEX_HOME'):
+        paths.append(Path(os.environ['CODEX_HOME']).expanduser().resolve())
     return sorted(set(map(str, paths)))
 
 
@@ -224,8 +224,8 @@ def command(binary, condition, work):
 
 def parse_discovery(events, answer, condition):
     metadata = parse_codex(events, answer)
-    metadata.update({k: events[-1][k] for k in ('total_cost_usd', 'modelUsage', 'duration_ms', 'duration_api_ms')
-                     if k in events[-1]})
+    if 'duration_ms' in events[-1]:
+        metadata['duration_ms'] = events[-1]['duration_ms']
     for event in events:
         if event.get('type') in ('thread.started', 'turn.started'):
             for field in ('model', 'effort'):
@@ -397,7 +397,7 @@ def run_locked(fresh, out, config, execute, codex, output_fd, units, max_calls):
         started = time.monotonic()
         receipt = {'state': 'running', 'pass': pass_no, 'started_at': timestamp(), 'ended_at': None,
                    'duration_seconds': None, 'condition': condition, 'task': task,
-                   'usage': None, 'total_cost_usd': None}
+                   'usage': None}
         atomic_json(capture / 'attempt.json', receipt)
         (capture / 'prompt.txt').write_text(prompt)
         try:
@@ -433,8 +433,8 @@ def run_locked(fresh, out, config, execute, codex, output_fd, units, max_calls):
             if (capture / 'trace.jsonl').exists():
                 try:
                     receipt['native_accounting'] = [
-                        {k: e[k] for k in ('type', 'usage', 'modelUsage', 'total_cost_usd') if k in e}
-                        for e in events_at(capture) if 'usage' in e or 'total_cost_usd' in e]
+                        {k: e[k] for k in ('type', 'usage') if k in e}
+                        for e in events_at(capture) if 'usage' in e]
                 except (ReviewError, ValueError, OSError):
                     pass
             return None

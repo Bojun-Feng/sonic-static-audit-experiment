@@ -65,8 +65,8 @@ benchmark grid; for a bounded run, pass `--unit`/`--max-calls` or point `--confi
 ## Scheduling and resume
 
 The queue pairs every unit with every discovery condition. Up to `concurrency` independent calls run at
-once. Each completed discovery publishes immediately. There is no candidate merging; findings remain
-independent even when their claims or locations match.
+once. Each completed discovery publishes immediately. Findings remain independent even when their claims
+or locations match.
 
 Cell IDs use readable arm, unit, model, effort, and pass values. Receipts carry the same task and
 condition. Candidate IDs use the discovery cell and the finding index. Changing passes or conditions
@@ -105,6 +105,7 @@ working directories are hidden. Workers can read their assigned frozen inputs an
 scratch directory. Controller-owned pipes retain diagnostics outside worker access. Use a dedicated
 output parent such as `.runtime/benchmark`; it must not contain the CLI executable or schemas. Provider
 authentication remains host-managed: the native client can authenticate, while model tools are denied
-provider credential directories, configured credential roots, macOS keychains, and `/proc`. Codex uses
-a read-only native permissions profile with tool networking disabled and a core-only shell environment.
+the Codex credential directory (`~/.codex`, or `CODEX_HOME` when set), macOS keychains, and `/proc`.
+Codex uses a read-only native permissions profile with tool networking disabled and a core-only shell
+environment.
 These controls require the pinned standalone CLI version from `config.json`.

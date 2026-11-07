@@ -114,8 +114,6 @@ ssh:
   forwardX11: false
   forwardX11Trusted: false
 propagateProxyEnv: false
-env:
-  DISABLE_AUTOUPDATER: "1"
 portForwards:
   - guestPortRange: [1, 65535]
     ignore: true

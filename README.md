@@ -41,21 +41,21 @@ Pass explicit `--create` with absolute, disjoint `--source`, `--reference`, and 
 
 ## How a run works
 
-The queue pairs every unit with every configured discovery condition, and each pass is an independent sample. Completed discoveries publish immediately. Each reported finding undergoes deterministic hard-gate screening, and admitted findings are recorded in `candidates.json`. Findings stay independent even when their claims or locations match; there is no merging.
+The queue pairs every unit with every configured discovery condition, and each pass is an independent sample. Completed discoveries publish immediately. Each reported finding undergoes deterministic hard-gate screening, and admitted findings are recorded in `candidates.json`. Findings stay independent even when their claims or locations match.
 
 Every admitted finding must satisfy all hard gates defined in `experiment/prompts/discovery.txt`, `experiment/schemas/discovery.json`, and `experiment/runner-config.json`:
 
 - Routing working-group ownership.
 - A supported `defect_kind` from the discovery schema.
 - Clear intended behavior and a reachable impact.
-- One obvious deterministic fix in one file (`files_touched` equal to `1`).
+- One obvious deterministic fix in one file (`files_touched` equal to `1`) that changes at most 50 logic lines (`max_fix_logic_lines` equal to `50`, tests excluded).
 - 5/5 confidence in both the defect and the remedy.
 
 ## Configuration and isolation
 
 - **Model catalog (`experiment/incremental-models.json`):** Eight Codex models, each supporting `low`, `medium`, `high`, `xhigh`, and `max` efforts and the `default` service tier.
 - **Canonical grid (`experiment/incremental-config.json`):** All eight models across all five efforts (40 conditions) over 5 passes at concurrency 16, totaling 83,000 discovery cells (415 units × 40 conditions × 5 passes).
-- **Worker isolation:** Each native invocation runs behind a checked worker boundary (`bubblewrap` on Linux, `sandbox-exec` on macOS). Workers read only their assigned frozen inputs and write only to their own scratch directory.
+- **Worker isolation:** Each native invocation runs behind a worker boundary probed before the call (`bubblewrap` on Linux, `sandbox-exec` on macOS). The boundary hides the output parent (sibling results and working directories) and the original input roots, exposes the frozen input copies read-only, and gives each attempt its own scratch directory. Codex runs with a read-only native permissions profile, tool networking disabled, and its credential directory, macOS keychains, and `/proc` denied to model tools.
 
 For full details on configuration, receipts, artifact layout, and worker boundaries, read the [independent discovery queue guide](experiment/INCREMENTAL.md).
 
